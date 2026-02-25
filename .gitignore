@@ -1,0 +1,62 @@
+# ============================================================
+# 몽글픽 AI Agent .gitignore
+# ⚠️  PUBLIC 레포지토리 — 시크릿/키 커밋 절대 금지
+# ============================================================
+
+# ── 환경 변수 / 시크릿 (최우선 차단) ──
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.secret
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── 가상환경 ──
+.venv/
+venv/
+ENV/
+
+# ── 대용량 데이터 (파이프라인 산출물, 재생성 가능) ──
+data/
+*.csv
+*.tsv
+*.parquet
+*.pickle
+*.pkl
+
+# ── IDE / 에디터 ──
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS 시스템 파일 ──
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Claude Code 세션 ──
+.claude/
+
+# ── Docker ──
+docker-compose.override.yml
+
+# ── 테스트 / 커버리지 ──
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── Jupyter ──
+.ipynb_checkpoints/
