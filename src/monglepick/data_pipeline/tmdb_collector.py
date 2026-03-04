@@ -105,14 +105,96 @@ class TMDBCollector:
 
     async def collect_movie_details(self, movie_id: int) -> TMDBRawMovie:
         """
-        영화 상세정보 수집 (크레딧 + 키워드 포함).
+        영화 상세정보 수집 (모든 서브리소스 포함).
 
-        §11-5: /movie/{id}?append_to_response=credits,keywords
+        Phase C 완전 데이터: append_to_response에 9개 서브리소스를 포함하여
+        단 1회의 API 호출로 모든 데이터를 수집한다.
+        - credits: 출연진/제작진 (id, name, character, profile_path, gender, popularity, original_name 등)
+        - keywords: 키워드 목록
+        - reviews: 사용자 리뷰
+        - videos: 트레일러/비하인드 영상 (language, official 포함)
+        - similar_movies: TMDB 유사 영화
+        - release_dates: 국가별 개봉일 + 관람등급
+        - images: 다중 포스터/배경 이미지
+        - alternative_titles: 대체 제목 (검색 개선용)
+        - recommendations: TMDB 추천 영화 (similar와 다른 알고리즘)
         """
         data = await self._get(
             f"/movie/{movie_id}",
-            params={"append_to_response": "credits,keywords"},
+            params={
+                "append_to_response": (
+                    "credits,keywords,reviews,videos,similar_movies,"
+                    "release_dates,images,alternative_titles,recommendations"
+                ),
+            },
         )
+
+        # Phase A: reviews.results에서 author, content, rating 추출
+        raw_reviews = data.get("reviews", {}).get("results", [])
+        reviews = [
+            {
+                "author": r.get("author", ""),
+                "content": r.get("content", ""),
+                "rating": r.get("author_details", {}).get("rating"),
+            }
+            for r in raw_reviews
+        ]
+
+        # Phase C: videos.results에서 모든 유용한 필드 추출 (language/official/published_at 포함)
+        raw_videos = data.get("videos", {}).get("results", [])
+        videos = [
+            {
+                "key": v.get("key", ""),
+                "type": v.get("type", ""),
+                "site": v.get("site", ""),
+                "name": v.get("name", ""),
+                "iso_639_1": v.get("iso_639_1", ""),  # Phase C: 비디오 언어
+                "iso_3166_1": v.get("iso_3166_1", ""),  # Phase C: 비디오 국가
+                "official": v.get("official", False),  # Phase C: 공식 여부
+                "published_at": v.get("published_at", ""),  # Phase C: 게시 날짜
+                "size": v.get("size", 0),  # Phase C: 해상도
+            }
+            for v in raw_videos
+        ]
+
+        # Phase A: similar_movies.results에서 id만 추출
+        raw_similar = data.get("similar_movies", {}).get("results", [])
+        similar_movie_ids = [m.get("id") for m in raw_similar if m.get("id")]
+
+        # Phase A: release_dates.results (국가별 개봉일 + 관람등급)
+        release_dates = data.get("release_dates", {}).get("results", [])
+
+        # Phase C: alternative_titles 추출
+        raw_alt_titles = data.get("alternative_titles", {}).get("titles", [])
+        alternative_titles = [
+            {
+                "iso_3166_1": t.get("iso_3166_1", ""),
+                "title": t.get("title", ""),
+                "type": t.get("type", ""),
+            }
+            for t in raw_alt_titles
+            if t.get("title")
+        ]
+
+        # Phase C: recommendations.results에서 id 추출 (similar와 다른 알고리즘)
+        raw_recommendations = data.get("recommendations", {}).get("results", [])
+        recommendations = [m.get("id") for m in raw_recommendations if m.get("id")]
+
+        # Phase C: images (다중 포스터/배경/로고 이미지 경로)
+        raw_images = data.get("images", {})
+        images = {
+            "posters": [
+                img.get("file_path", "")
+                for img in raw_images.get("posters", [])[:10]  # 최대 10개
+                if img.get("file_path")
+            ],
+            "backdrops": [
+                img.get("file_path", "")
+                for img in raw_images.get("backdrops", [])[:10]  # 최대 10개
+                if img.get("file_path")
+            ],
+        }
+
         return TMDBRawMovie(
             id=data.get("id", movie_id),
             title=data.get("title", ""),
@@ -120,12 +202,36 @@ class TMDBCollector:
             overview=data.get("overview", ""),
             release_date=data.get("release_date", ""),
             vote_average=data.get("vote_average", 0.0),
+            vote_count=data.get("vote_count", 0),
             popularity=data.get("popularity", 0.0),
             poster_path=data.get("poster_path"),
             runtime=data.get("runtime"),
             genres=data.get("genres", []),
             credits=data.get("credits", {}),
             keywords=data.get("keywords", {}),
+            reviews=reviews,
+            videos=videos,
+            similar_movie_ids=similar_movie_ids,
+            release_dates=release_dates,
+            # Phase B: TMDB 추가 필드
+            budget=data.get("budget", 0) or 0,
+            revenue=data.get("revenue", 0) or 0,
+            tagline=data.get("tagline", "") or "",
+            homepage=data.get("homepage", "") or "",
+            belongs_to_collection=data.get("belongs_to_collection"),
+            production_companies=data.get("production_companies", []),
+            production_countries=data.get("production_countries", []),
+            original_language=data.get("original_language", "") or "",
+            spoken_languages=data.get("spoken_languages", []),
+            imdb_id=data.get("imdb_id", "") or "",
+            backdrop_path=data.get("backdrop_path"),
+            adult=data.get("adult", False),
+            status=data.get("status", "") or "",
+            # Phase C: 완전 데이터 추출
+            origin_country=data.get("origin_country", []),
+            alternative_titles=alternative_titles,
+            recommendations=recommendations,
+            images=images,
         )
 
     async def collect_watch_providers(self, movie_id: int) -> dict:

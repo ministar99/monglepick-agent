@@ -1,0 +1,28 @@
+"""
+LLM 팩토리 모듈.
+
+용도별 ChatOllama 인스턴스를 생성하는 팩토리 함수를 제공한다.
+동일 파라미터에 대해 싱글턴 캐싱을 적용한다.
+"""
+
+from monglepick.llm.factory import (
+    get_conversation_llm,
+    get_emotion_llm,
+    get_explanation_llm,
+    get_intent_llm,
+    get_llm,
+    get_preference_llm,
+    get_question_llm,
+    get_structured_llm,
+)
+
+__all__ = [
+    "get_llm",
+    "get_structured_llm",
+    "get_intent_llm",
+    "get_emotion_llm",
+    "get_preference_llm",
+    "get_conversation_llm",
+    "get_question_llm",
+    "get_explanation_llm",
+]

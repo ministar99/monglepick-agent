@@ -153,6 +153,122 @@ def _row_to_movie_document(row: pd.Series) -> MovieDocument | None:
     runtime = int(row.get("runtime", 0)) if pd.notna(row.get("runtime")) else 0
     poster_path = str(row.get("poster_path", "")) if pd.notna(row.get("poster_path")) else ""
 
+    # Phase B: 재무 정보
+    budget = int(row.get("budget", 0)) if pd.notna(row.get("budget")) else 0
+    revenue = int(row.get("revenue", 0)) if pd.notna(row.get("revenue")) else 0
+    vote_count = int(row.get("vote_count", 0)) if pd.notna(row.get("vote_count")) else 0
+
+    # Phase B: 텍스트 메타데이터
+    tagline = str(row.get("tagline", "")) if pd.notna(row.get("tagline")) else ""
+    homepage = str(row.get("homepage", "")) if pd.notna(row.get("homepage")) else ""
+
+    # Phase B: 컬렉션/프랜차이즈
+    collection_parsed = row.get("collection_parsed")
+    collection_id = 0
+    collection_name = ""
+    if isinstance(collection_parsed, dict):
+        collection_id = int(collection_parsed.get("id", 0) or 0)
+        collection_name = str(collection_parsed.get("name", "") or "")
+
+    # Phase B: 제작사
+    production_companies_parsed = row.get("production_companies_parsed", [])
+    if not isinstance(production_companies_parsed, list):
+        production_companies_parsed = []
+    production_companies = [
+        {"id": int(c.get("id", 0) or 0), "name": str(c.get("name", ""))}
+        for c in production_companies_parsed
+        if c.get("name")
+    ]
+
+    # Phase B: 제작 국가
+    production_countries_parsed = row.get("production_countries_parsed", [])
+    if not isinstance(production_countries_parsed, list):
+        production_countries_parsed = []
+    production_countries = [
+        str(c.get("iso_3166_1", ""))
+        for c in production_countries_parsed
+        if c.get("iso_3166_1")
+    ]
+
+    # Phase B: 언어 정보
+    original_language = str(row.get("original_language", "")) if pd.notna(row.get("original_language")) else ""
+    spoken_languages_parsed = row.get("spoken_languages_parsed", [])
+    if not isinstance(spoken_languages_parsed, list):
+        spoken_languages_parsed = []
+    spoken_languages = [
+        str(lang.get("iso_639_1", ""))
+        for lang in spoken_languages_parsed
+        if lang.get("iso_639_1")
+    ]
+
+    # Phase B: 외부 ID 및 메타
+    imdb_id = str(row.get("imdb_id", "")) if pd.notna(row.get("imdb_id")) else ""
+    adult = bool(row.get("adult", False))
+    status = str(row.get("status", "")) if pd.notna(row.get("status")) else ""
+
+    # Phase B: 확장 크레딧
+    cast_characters = row.get("cast_characters", [])
+    if not isinstance(cast_characters, list):
+        cast_characters = []
+    cinematographer = str(row.get("cinematographer", "")) if pd.notna(row.get("cinematographer")) else ""
+    composer = str(row.get("composer", "")) if pd.notna(row.get("composer")) else ""
+    screenwriters = row.get("screenwriters", [])
+    if not isinstance(screenwriters, list):
+        screenwriters = []
+    producers = row.get("producers", [])
+    if not isinstance(producers, list):
+        producers = []
+    editor = str(row.get("editor", "")) if pd.notna(row.get("editor")) else ""
+
+    # Phase C: 추가 크루
+    executive_producers = row.get("executive_producers", [])
+    if not isinstance(executive_producers, list):
+        executive_producers = []
+    production_designer_val = str(row.get("production_designer", "")) if pd.notna(row.get("production_designer")) else ""
+    costume_designer_val = str(row.get("costume_designer", "")) if pd.notna(row.get("costume_designer")) else ""
+    source_author_val = str(row.get("source_author", "")) if pd.notna(row.get("source_author")) else ""
+
+    # Phase C: 감독 상세 정보
+    director_details = row.get("director_details", {})
+    if not isinstance(director_details, dict):
+        director_details = {}
+    director_id = int(director_details.get("id", 0) or 0)
+    director_profile_path = str(director_details.get("profile_path", "") or "")
+
+    # Phase C: 비디오 플래그
+    video_flag = bool(row.get("video_flag", False))
+
+    # Phase C: 컬렉션 이미지 추출
+    collection_poster_path = ""
+    collection_backdrop_path = ""
+    if isinstance(collection_parsed, dict):
+        collection_poster_path = str(collection_parsed.get("poster_path") or "")
+        collection_backdrop_path = str(collection_parsed.get("backdrop_path") or "")
+
+    # Phase C: 제작사 확장 (logo_path, origin_country 포함)
+    production_companies_full = [
+        {
+            "id": int(c.get("id", 0) or 0),
+            "name": str(c.get("name", "")),
+            "logo_path": str(c.get("logo_path") or ""),
+            "origin_country": str(c.get("origin_country", "")),
+        }
+        for c in production_companies_parsed
+        if c.get("name")
+    ]
+
+    # Phase C: 국가/언어 전체 이름
+    production_country_names = [
+        str(c.get("name", ""))
+        for c in production_countries_parsed
+        if c.get("name")
+    ]
+    spoken_language_names = [
+        str(lang.get("name") or lang.get("english_name", ""))
+        for lang in spoken_languages_parsed
+        if lang.get("name") or lang.get("english_name")
+    ]
+
     # 무드태그 (장르 기반 fallback)
     mood_tags = get_fallback_mood_tags(genres)
 
@@ -177,6 +293,41 @@ def _row_to_movie_document(row: pd.Series) -> MovieDocument | None:
         cast=cast_names,
         ott_platforms=[],  # Kaggle에는 OTT 정보 없음
         mood_tags=mood_tags,
+        # Phase B: 재무/텍스트 메타데이터
+        budget=budget,
+        revenue=revenue,
+        vote_count=vote_count,
+        tagline=tagline,
+        homepage=homepage,
+        # Phase B: 컬렉션/제작사
+        collection_id=collection_id,
+        collection_name=collection_name,
+        production_companies=production_companies_full,
+        production_countries=production_countries,
+        original_language=original_language,
+        spoken_languages=spoken_languages,
+        imdb_id=imdb_id,
+        adult=adult,
+        status=status,
+        # Phase B: 확장 크레딧
+        cast_characters=cast_characters,
+        cinematographer=cinematographer,
+        composer=composer,
+        screenwriters=screenwriters,
+        producers=producers,
+        editor=editor,
+        # Phase C: 완전 데이터 추출
+        director_id=director_id,
+        director_profile_path=director_profile_path,
+        video_flag=video_flag,
+        executive_producers=executive_producers,
+        production_designer=production_designer_val,
+        costume_designer=costume_designer_val,
+        source_author=source_author_val,
+        collection_poster_path=collection_poster_path,
+        collection_backdrop_path=collection_backdrop_path,
+        production_country_names=production_country_names,
+        spoken_language_names=spoken_language_names,
         source="kaggle",
     )
 

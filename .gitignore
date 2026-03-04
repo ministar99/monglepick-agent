@@ -60,3 +60,5 @@ coverage.xml
 
 # ── Jupyter ──
 .ipynb_checkpoints/
+
+scripts/

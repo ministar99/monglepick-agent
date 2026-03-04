@@ -8,6 +8,9 @@
     # TMDB 수집 건너뛰기 (기존 데이터 재적재)
     uv run python scripts/run_pipeline.py --skip-collect
 
+    # 캐시에서 TMDB 데이터 로드 (API 재호출 없이 재처리)
+    uv run python scripts/run_pipeline.py --use-cache --skip-mood
+
     # 무드태그 GPT 생성 건너뛰기 (fallback 사용, API 비용 절약)
     uv run python scripts/run_pipeline.py --skip-mood
 
@@ -40,6 +43,11 @@ def main() -> None:
         help="GPT 무드태그 생성을 건너뜁니다 (장르 기반 fallback 사용)",
     )
     parser.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="TMDB API 대신 캐시 파일에서 로드합니다 (data/tmdb/tmdb_raw_movies.json)",
+    )
+    parser.add_argument(
         "--kaggle-dir",
         type=str,
         default="data/kaggle_movies",
@@ -60,6 +68,7 @@ def main() -> None:
             skip_mood_generation=args.skip_mood,
             kaggle_data_dir=args.kaggle_dir,
             embedding_batch_size=args.batch_size,
+            use_cache=args.use_cache,
         )
     )
 

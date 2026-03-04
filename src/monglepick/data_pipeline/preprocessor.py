@@ -141,6 +141,285 @@ def extract_keywords(keywords_data: dict) -> list[str]:
     return [kw.get("name", "") for kw in keywords if kw.get("name")]
 
 
+# ============================================================
+# Phase B: 확장 크레딧 추출 함수
+# ============================================================
+
+
+def extract_cast_with_characters(credits: dict, top_n: int = 5) -> list[dict]:
+    """
+    credits.cast에서 상위 N명 배우의 상세 정보를 추출한다.
+
+    Phase C 확장: id, profile_path, gender, popularity, original_name, order 추가.
+    모든 필드를 dict에 포함하여 Person 노드 품질 개선 (ID 기반 중복 방지, 사진 표시 등).
+    """
+    cast = credits.get("cast", [])
+    return [
+        {
+            "id": p.get("id", 0),  # Phase C: TMDB person ID
+            "name": p.get("name", ""),
+            "character": p.get("character", ""),
+            "profile_path": p.get("profile_path") or "",  # Phase C: 프로필 사진
+            "gender": p.get("gender", 0),  # Phase C: 0=미지정, 1=여성, 2=남성
+            "popularity": p.get("popularity", 0.0),  # Phase C: 인기도
+            "original_name": p.get("original_name", ""),  # Phase C: 원어 이름
+            "order": p.get("order", 0),  # Phase C: 빌링 순서
+        }
+        for p in cast[:top_n]
+        if p.get("name")
+    ]
+
+
+def extract_cinematographer(credits: dict) -> str:
+    """credits.crew에서 촬영감독(Director of Photography)을 추출한다."""
+    for person in credits.get("crew", []):
+        if person.get("job") == "Director of Photography":
+            return person.get("name", "")
+    return ""
+
+
+def extract_composer(credits: dict) -> str:
+    """credits.crew에서 음악감독/작곡가를 추출한다."""
+    for person in credits.get("crew", []):
+        if person.get("job") in ("Original Music Composer", "Music"):
+            return person.get("name", "")
+    return ""
+
+
+def extract_screenwriters(credits: dict) -> list[str]:
+    """credits.crew에서 각본가 목록을 추출한다."""
+    writers: list[str] = []
+    for person in credits.get("crew", []):
+        if person.get("job") in ("Screenplay", "Writer") and person.get("name"):
+            if person["name"] not in writers:
+                writers.append(person["name"])
+    return writers
+
+
+def extract_producers(credits: dict) -> list[str]:
+    """credits.crew에서 프로듀서 목록을 추출한다 (Producer 직급만)."""
+    return [
+        p.get("name", "")
+        for p in credits.get("crew", [])
+        if p.get("job") == "Producer" and p.get("name")
+    ]
+
+
+def extract_editor(credits: dict) -> str:
+    """credits.crew에서 편집자를 추출한다."""
+    for person in credits.get("crew", []):
+        if person.get("job") == "Editor":
+            return person.get("name", "")
+    return ""
+
+
+# ============================================================
+# Phase C: 감독 확장 정보 + 추가 크루 추출
+# ============================================================
+
+
+def extract_director_details(credits: dict) -> dict:
+    """
+    credits.crew에서 감독의 상세 정보를 추출한다.
+
+    Phase C: TMDB person ID, 프로필 사진, 원어 이름 포함.
+    Person 노드에서 이름 충돌 방지를 위해 ID를 활용한다.
+
+    Returns:
+        {"id": int, "name": str, "profile_path": str, "original_name": str}
+    """
+    for person in credits.get("crew", []):
+        if person.get("job") == "Director":
+            return {
+                "id": person.get("id", 0),
+                "name": person.get("name", ""),
+                "profile_path": person.get("profile_path") or "",
+                "original_name": person.get("original_name", ""),
+            }
+    return {"id": 0, "name": "", "profile_path": "", "original_name": ""}
+
+
+def extract_executive_producers(credits: dict) -> list[str]:
+    """credits.crew에서 총괄 프로듀서 목록을 추출한다."""
+    return [
+        p.get("name", "")
+        for p in credits.get("crew", [])
+        if p.get("job") == "Executive Producer" and p.get("name")
+    ]
+
+
+def extract_production_designer(credits: dict) -> str:
+    """credits.crew에서 프로덕션 디자이너를 추출한다."""
+    for person in credits.get("crew", []):
+        if person.get("job") == "Production Design":
+            return person.get("name", "")
+    return ""
+
+
+def extract_costume_designer(credits: dict) -> str:
+    """credits.crew에서 의상 디자이너를 추출한다."""
+    for person in credits.get("crew", []):
+        if person.get("job") in ("Costume Design", "Costume Designer"):
+            return person.get("name", "")
+    return ""
+
+
+def extract_source_author(credits: dict) -> str:
+    """credits.crew에서 원작 작가를 추출한다 (Novel/Characters 직군)."""
+    for person in credits.get("crew", []):
+        if person.get("job") in ("Novel", "Characters", "Original Story", "Story"):
+            return person.get("name", "")
+    return ""
+
+
+# ============================================================
+# Phase C: 이미지 / 대체 제목 / 추천 / KR 개봉일 추출
+# ============================================================
+
+
+def extract_images(raw_images: dict) -> tuple[list[str], list[str]]:
+    """
+    TMDB images에서 포스터/배경 이미지 경로를 추출한다 (각 최대 10개).
+
+    Returns:
+        (posters, backdrops) 튜플
+    """
+    posters = raw_images.get("posters", [])
+    backdrops = raw_images.get("backdrops", [])
+    return (
+        [img for img in posters[:10] if img],
+        [img for img in backdrops[:10] if img],
+    )
+
+
+def extract_kr_release_date(raw_release_dates: list[dict]) -> str:
+    """
+    release_dates에서 한국(KR) 극장 개봉일을 추출한다.
+
+    release type 3 (Theatrical) 우선, 없으면 type 4 (Digital), 없으면 첫 번째.
+    KR 데이터가 없으면 빈 문자열 반환.
+
+    Returns:
+        "YYYY-MM-DD" 형식 개봉일 또는 빈 문자열
+    """
+    for entry in raw_release_dates:
+        if entry.get("iso_3166_1") == "KR":
+            releases = entry.get("release_dates", [])
+            # type 3 (Theatrical) 우선
+            for r in releases:
+                if r.get("type") == 3:
+                    date_str = r.get("release_date", "")
+                    if date_str:
+                        return date_str[:10]  # ISO 날짜에서 YYYY-MM-DD만 추출
+            # type 4 (Digital) fallback
+            for r in releases:
+                if r.get("type") == 4:
+                    date_str = r.get("release_date", "")
+                    if date_str:
+                        return date_str[:10]
+            # 아무 타입이나 첫 번째
+            if releases:
+                date_str = releases[0].get("release_date", "")
+                if date_str:
+                    return date_str[:10]
+    return ""
+
+
+def extract_collection_images(raw_collection: dict | None) -> tuple[str, str]:
+    """
+    TMDB belongs_to_collection에서 컬렉션 포스터/배경 이미지를 추출한다.
+
+    Returns:
+        (poster_path, backdrop_path) 튜플
+    """
+    if not raw_collection:
+        return "", ""
+    return (
+        raw_collection.get("poster_path") or "",
+        raw_collection.get("backdrop_path") or "",
+    )
+
+
+def extract_production_companies_full(raw_companies: list[dict]) -> list[dict]:
+    """
+    TMDB production_companies를 {id, name, logo_path, origin_country} 딕셔너리 리스트로 정규화한다.
+
+    Phase C: logo_path와 origin_country 추가.
+    """
+    return [
+        {
+            "id": c.get("id", 0),
+            "name": c.get("name", ""),
+            "logo_path": c.get("logo_path") or "",  # Phase C: 제작사 로고
+            "origin_country": c.get("origin_country", ""),  # Phase C: 제작사 본국
+        }
+        for c in raw_companies
+        if c.get("name")
+    ]
+
+
+def extract_production_country_names(raw_countries: list[dict]) -> list[str]:
+    """TMDB production_countries에서 국가 전체 이름 리스트를 추출한다."""
+    return [
+        c.get("name", "")
+        for c in raw_countries
+        if c.get("name")
+    ]
+
+
+def extract_spoken_language_names(raw_languages: list[dict]) -> list[str]:
+    """TMDB spoken_languages에서 언어 전체 이름 리스트를 추출한다."""
+    names: list[str] = []
+    for lang in raw_languages:
+        # english_name 우선, 없으면 name (native name) 사용
+        name = lang.get("english_name") or lang.get("name", "")
+        if name:
+            names.append(name)
+    return names
+
+
+# ============================================================
+# Phase B: 컬렉션/제작사/국가/언어 추출 함수
+# ============================================================
+
+
+def extract_collection(raw_collection: dict | None) -> tuple[int, str]:
+    """TMDB belongs_to_collection에서 컬렉션 ID와 이름을 추출한다."""
+    if not raw_collection:
+        return 0, ""
+    return (
+        raw_collection.get("id", 0) or 0,
+        raw_collection.get("name", "") or "",
+    )
+
+
+def extract_production_companies(raw_companies: list[dict]) -> list[dict]:
+    """TMDB production_companies를 {id, name} 딕셔너리 리스트로 정규화한다."""
+    return [
+        {"id": c.get("id", 0), "name": c.get("name", "")}
+        for c in raw_companies
+        if c.get("name")
+    ]
+
+
+def extract_production_countries(raw_countries: list[dict]) -> list[str]:
+    """TMDB production_countries에서 ISO 코드 리스트를 추출한다."""
+    return [
+        c.get("iso_3166_1", "")
+        for c in raw_countries
+        if c.get("iso_3166_1")
+    ]
+
+
+def extract_spoken_languages(raw_languages: list[dict]) -> list[str]:
+    """TMDB spoken_languages에서 ISO 코드 리스트를 추출한다."""
+    return [
+        lang.get("iso_639_1", "")
+        for lang in raw_languages
+        if lang.get("iso_639_1")
+    ]
+
+
 def normalize_ott_platforms(watch_providers: dict) -> list[str]:
     """
     TMDB watch/providers 응답에서 한국(KR) OTT 플랫폼 목록을 추출하고 한국어로 정규화한다.
@@ -161,25 +440,205 @@ def normalize_ott_platforms(watch_providers: dict) -> list[str]:
     return result
 
 
+# ============================================================
+# Phase A: TMDB 보강 데이터 추출 함수
+# ============================================================
+
+
+def extract_reviews(raw_reviews: list[dict], max_count: int = 5, max_len: int = 500) -> list[str]:
+    """
+    리뷰 텍스트를 추출하고 길이를 제한한다.
+
+    rating이 높은 순으로 정렬하여 상위 max_count개를 반환한다.
+    rating이 None인 리뷰는 rating=0으로 간주하여 뒤로 밀린다.
+
+    Args:
+        raw_reviews: [{"author": "...", "content": "...", "rating": 8.0}, ...]
+        max_count: 최대 리뷰 수 (기본 5)
+        max_len: 리뷰당 최대 글자 수 (기본 500)
+
+    Returns:
+        리뷰 텍스트 리스트 (길이 제한 적용)
+    """
+    # rating 높은 순 정렬 (None → 0으로 처리)
+    sorted_reviews = sorted(
+        raw_reviews,
+        key=lambda r: r.get("rating") or 0,
+        reverse=True,
+    )
+
+    result: list[str] = []
+    for review in sorted_reviews[:max_count]:
+        content = review.get("content", "").strip()
+        if content:
+            # 최대 길이 제한
+            result.append(content[:max_len])
+
+    return result
+
+
+def extract_trailer_url(raw_videos: list[dict]) -> str:
+    """
+    YouTube 트레일러 URL을 추출한다.
+
+    우선순위: Trailer > Teaser. YouTube가 아닌 사이트는 무시.
+    동일 타입이 여러 개면 첫 번째를 사용한다.
+
+    Args:
+        raw_videos: [{"key": "dQw4...", "type": "Trailer", "site": "YouTube"}, ...]
+
+    Returns:
+        YouTube URL (예: "https://www.youtube.com/watch?v=dQw4...") 또는 빈 문자열
+    """
+    # YouTube 비디오만 필터링
+    youtube_videos = [v for v in raw_videos if v.get("site") == "YouTube" and v.get("key")]
+
+    # Trailer 우선 탐색
+    for video in youtube_videos:
+        if video.get("type") == "Trailer":
+            return f"https://www.youtube.com/watch?v={video['key']}"
+
+    # Trailer 없으면 Teaser
+    for video in youtube_videos:
+        if video.get("type") == "Teaser":
+            return f"https://www.youtube.com/watch?v={video['key']}"
+
+    return ""
+
+
+def extract_behind_the_scenes(raw_videos: list[dict]) -> list[str]:
+    """
+    비하인드/피처렛/메이킹 YouTube URL을 추출한다.
+
+    대상 타입: Behind the Scenes, Featurette
+
+    Args:
+        raw_videos: [{"key": "...", "type": "Behind the Scenes", "site": "YouTube"}, ...]
+
+    Returns:
+        YouTube URL 리스트
+    """
+    bts_types = {"Behind the Scenes", "Featurette"}
+    result: list[str] = []
+
+    for video in raw_videos:
+        if (
+            video.get("site") == "YouTube"
+            and video.get("key")
+            and video.get("type") in bts_types
+        ):
+            result.append(f"https://www.youtube.com/watch?v={video['key']}")
+
+    return result
+
+
+def extract_certification(raw_release_dates: list[dict], country: str = "KR") -> str:
+    """
+    한국(KR) 관람등급을 추출한다. KR 데이터가 없으면 US fallback.
+
+    TMDB release_dates.results 형식:
+    [{"iso_3166_1": "KR", "release_dates": [{"certification": "15", "type": 3}]}, ...]
+
+    TMDB certification 값을 한국어로 매핑:
+    - "All" / "" → "전체 관람가"
+    - "12" → "12세 이상 관람가"
+    - "15" → "15세 이상 관람가"
+    - "18" / "R" → "청소년 관람불가"
+    - "Restricted Screening" → "제한상영가"
+
+    Args:
+        raw_release_dates: TMDB release_dates.results 배열
+        country: 우선 탐색 국가 (기본 "KR")
+
+    Returns:
+        한국어 관람등급 문자열 또는 빈 문자열
+    """
+    # KR 관람등급 → 한국어 매핑
+    cert_kr_map: dict[str, str] = {
+        "All": "전체 관람가",
+        "전체 관람가": "전체 관람가",
+        "12": "12세 이상 관람가",
+        "12세 이상 관람가": "12세 이상 관람가",
+        "15": "15세 이상 관람가",
+        "15세 이상 관람가": "15세 이상 관람가",
+        "18": "청소년 관람불가",
+        "청소년 관람불가": "청소년 관람불가",
+        "Restricted Screening": "제한상영가",
+        "제한상영가": "제한상영가",
+    }
+
+    # US 관람등급 → 한국어 매핑 (fallback용)
+    cert_us_map: dict[str, str] = {
+        "G": "전체 관람가",
+        "PG": "전체 관람가",
+        "PG-13": "12세 이상 관람가",
+        "R": "청소년 관람불가",
+        "NC-17": "청소년 관람불가",
+        "NR": "",
+    }
+
+    def _find_cert(country_code: str, mapping: dict[str, str]) -> str:
+        """특정 국가의 관람등급을 찾아 매핑한다."""
+        for entry in raw_release_dates:
+            if entry.get("iso_3166_1") == country_code:
+                releases = entry.get("release_dates", [])
+                for release in releases:
+                    cert = release.get("certification", "").strip()
+                    if cert and cert in mapping:
+                        return mapping[cert]
+        return ""
+
+    # 1차: KR 관람등급
+    result = _find_cert("KR", cert_kr_map)
+    if result:
+        return result
+
+    # 2차: US 관람등급 (fallback)
+    return _find_cert("US", cert_us_map)
+
+
 def build_embedding_text(doc: MovieDocument) -> str:
     """
     임베딩 모델 입력용 구조화 텍스트를 생성한다.
 
-    §11-6 단계 3: [제목] {title} [장르] {genres} [감독] {director}
-                   [키워드] {keywords} [무드] {mood_tags} [줄거리] {overview[:200]}
+    Phase A 개선:
+    - overview 200자 제한 해제 (임베딩 모델이 긴 텍스트 처리 가능)
+    - cast (출연진) 추가: 배우 이름이 검색에 중요
+    - certification (관람등급) 추가
+    - reviews[0][:300] (첫 번째 리뷰 300자) 추가: 영화 평가 맥락 제공
+
+    형식: [제목] {title} [장르] {genres} [감독] {director} [출연] {cast}
+          [키워드] {keywords} [무드] {mood_tags} [관람등급] {certification}
+          [줄거리] {overview} [리뷰] {reviews[0][:300]}
     """
     parts = [
         f"[제목] {doc.title}",
         f"[장르] {', '.join(doc.genres)}",
     ]
+    # Phase B: 태그라인 추가 (캐치프레이즈가 있으면 임베딩에 반영)
+    if doc.tagline:
+        parts.append(f"[태그라인] {doc.tagline}")
     if doc.director:
         parts.append(f"[감독] {doc.director}")
+    if doc.cast:
+        parts.append(f"[출연] {', '.join(doc.cast)}")
+    # Phase B: 확장 크레딧 추가
+    if doc.screenwriters:
+        parts.append(f"[각본] {', '.join(doc.screenwriters)}")
+    if doc.composer:
+        parts.append(f"[음악] {doc.composer}")
     if doc.keywords:
         parts.append(f"[키워드] {', '.join(doc.keywords[:10])}")
     if doc.mood_tags:
         parts.append(f"[무드] {', '.join(doc.mood_tags)}")
+    if doc.certification:
+        parts.append(f"[관람등급] {doc.certification}")
     if doc.overview:
-        parts.append(f"[줄거리] {doc.overview[:200]}")
+        # Phase A: 200자 제한 해제 → 전체 줄거리 사용
+        parts.append(f"[줄거리] {doc.overview}")
+    if doc.reviews:
+        # Phase A: 첫 번째 리뷰 300자 추가 (영화 평가 맥락)
+        parts.append(f"[리뷰] {doc.reviews[0][:300]}")
 
     return " ".join(parts)
 
@@ -359,6 +818,46 @@ async def process_raw_movie(raw: TMDBRawMovie, generate_mood: bool = True) -> Mo
     # OTT 정규화
     ott_platforms = normalize_ott_platforms(raw.watch_providers)
 
+    # Phase A: TMDB 보강 데이터 추출
+    reviews = extract_reviews(raw.reviews)
+    trailer_url = extract_trailer_url(raw.videos)
+    behind_the_scenes = extract_behind_the_scenes(raw.videos)
+    certification = extract_certification(raw.release_dates)
+    similar_movie_ids = [str(mid) for mid in raw.similar_movie_ids]
+
+    # Phase B: 확장 크레딧 추출
+    cast_characters = extract_cast_with_characters(raw.credits)
+    cinematographer = extract_cinematographer(raw.credits)
+    composer = extract_composer(raw.credits)
+    screenwriters = extract_screenwriters(raw.credits)
+    producers = extract_producers(raw.credits)
+    editor_name = extract_editor(raw.credits)
+
+    # Phase C: 감독 상세 정보 + 추가 크루
+    director_details = extract_director_details(raw.credits)
+    executive_prods = extract_executive_producers(raw.credits)
+    prod_designer = extract_production_designer(raw.credits)
+    costume_des = extract_costume_designer(raw.credits)
+    src_author = extract_source_author(raw.credits)
+
+    # Phase B: 컬렉션/제작사/국가/언어 추출
+    collection_id, collection_name = extract_collection(raw.belongs_to_collection)
+    production_countries = extract_production_countries(raw.production_countries)
+    spoken_languages = extract_spoken_languages(raw.spoken_languages)
+
+    # Phase C: 제작사 확장 (logo_path, origin_country 포함)
+    production_companies = extract_production_companies_full(raw.production_companies)
+
+    # Phase C: 국가/언어 전체 이름
+    production_country_names = extract_production_country_names(raw.production_countries)
+    spoken_language_names = extract_spoken_language_names(raw.spoken_languages)
+
+    # Phase C: 컬렉션 이미지 / 다중 이미지 / KR 개봉일
+    collection_poster, collection_backdrop = extract_collection_images(raw.belongs_to_collection)
+    images_posters, images_backdrops = extract_images(raw.images)
+    kr_release_date = extract_kr_release_date(raw.release_dates)
+    recommendation_ids = [str(mid) for mid in raw.recommendations]
+
     # MovieDocument 생성 (무드태그/임베딩텍스트 제외)
     doc = MovieDocument(
         id=str(raw.id),
@@ -368,6 +867,7 @@ async def process_raw_movie(raw: TMDBRawMovie, generate_mood: bool = True) -> Mo
         release_year=release_year,
         runtime=raw.runtime or 0,
         rating=raw.vote_average,
+        vote_count=raw.vote_count,
         popularity_score=raw.popularity,
         poster_path=raw.poster_path or "",
         genres=genres,
@@ -375,6 +875,53 @@ async def process_raw_movie(raw: TMDBRawMovie, generate_mood: bool = True) -> Mo
         director=director,
         cast=cast,
         ott_platforms=ott_platforms,
+        # Phase A: 보강 필드
+        reviews=reviews,
+        trailer_url=trailer_url,
+        behind_the_scenes=behind_the_scenes,
+        certification=certification,
+        similar_movie_ids=similar_movie_ids,
+        # Phase B: 재무/텍스트 메타데이터
+        budget=raw.budget,
+        revenue=raw.revenue,
+        tagline=raw.tagline,
+        homepage=raw.homepage,
+        # Phase B: 컬렉션/제작사
+        collection_id=collection_id,
+        collection_name=collection_name,
+        production_companies=production_companies,
+        production_countries=production_countries,
+        original_language=raw.original_language,
+        spoken_languages=spoken_languages,
+        imdb_id=raw.imdb_id,
+        backdrop_path=raw.backdrop_path or "",
+        adult=raw.adult,
+        status=raw.status,
+        # Phase B: 확장 크레딧
+        cast_characters=cast_characters,
+        cinematographer=cinematographer,
+        composer=composer,
+        screenwriters=screenwriters,
+        producers=producers,
+        editor=editor_name,
+        # Phase C: 완전 데이터 추출
+        origin_country=raw.origin_country,
+        director_id=director_details["id"],
+        director_profile_path=director_details["profile_path"],
+        director_original_name=director_details["original_name"],
+        alternative_titles=raw.alternative_titles,
+        recommendation_ids=recommendation_ids,
+        images_posters=images_posters,
+        images_backdrops=images_backdrops,
+        collection_poster_path=collection_poster,
+        collection_backdrop_path=collection_backdrop,
+        kr_release_date=kr_release_date,
+        executive_producers=executive_prods,
+        production_designer=prod_designer,
+        costume_designer=costume_des,
+        source_author=src_author,
+        production_country_names=production_country_names,
+        spoken_language_names=spoken_language_names,
         source="tmdb",
     )
 

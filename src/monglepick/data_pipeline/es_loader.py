@@ -25,6 +25,7 @@ def _movie_to_es_doc(doc: MovieDocument) -> dict:
         "_index": ES_INDEX_NAME,
         "_id": doc.id,
         "_source": {
+            # ── 기본 메타데이터 ──
             "id": doc.id,
             "title": doc.title,
             "title_en": doc.title_en,
@@ -39,6 +40,87 @@ def _movie_to_es_doc(doc: MovieDocument) -> dict:
             "release_year": doc.release_year,
             "rating": doc.rating,
             "popularity_score": doc.popularity_score,
+            "runtime": doc.runtime,
+            "poster_path": doc.poster_path,
+            # ── Phase A: 리뷰/관람등급/트레일러 ──
+            "reviews": " ".join(doc.reviews[:3]),
+            "certification": doc.certification,
+            "trailer_url": doc.trailer_url,
+            "vote_count": doc.vote_count,
+            "behind_the_scenes": doc.behind_the_scenes,
+            "similar_movie_ids": doc.similar_movie_ids,
+            # ── KMDb 보강 필드 ──
+            "awards": doc.awards,
+            "filming_location": doc.filming_location,
+            "audience_count": doc.audience_count,
+            # ── Phase B: 텍스트 검색 필드 ──
+            "tagline": doc.tagline,
+            "collection_name": doc.collection_name,
+            "production_companies": " ".join(c.get("name", "") for c in doc.production_companies),
+            "screenwriters": " ".join(doc.screenwriters),
+            "cinematographer": doc.cinematographer,
+            "composer": doc.composer,
+            "producers": " ".join(doc.producers),
+            "editor": doc.editor,
+            # ── Phase B: 필터링 필드 ──
+            "original_language": doc.original_language,
+            "production_countries": doc.production_countries,
+            "budget": doc.budget,
+            "revenue": doc.revenue,
+            "adult": doc.adult,
+            "status": doc.status,
+            "collection_id": doc.collection_id,
+            "imdb_id": doc.imdb_id,
+            "spoken_languages": doc.spoken_languages,
+            "backdrop_path": doc.backdrop_path,
+            "homepage": doc.homepage,
+            # ── Phase C: 완전 데이터 추출 ──
+            "origin_country": doc.origin_country,
+            "director_id": doc.director_id,
+            "alternative_titles": [t.get("title", "") for t in doc.alternative_titles],
+            "recommendation_ids": doc.recommendation_ids,
+            "kr_release_date": doc.kr_release_date,
+            "video_flag": doc.video_flag,
+            "executive_producers": " ".join(doc.executive_producers),
+            "production_designer": doc.production_designer,
+            "costume_designer": doc.costume_designer,
+            "source_author": doc.source_author,
+            "production_country_names": doc.production_country_names,
+            "spoken_language_names": doc.spoken_language_names,
+            # 캐스트 캐릭터 매핑 (검색용 텍스트)
+            "cast_characters": " ".join(
+                f"{c.get('name', '')}({c.get('character', '')})"
+                for c in doc.cast_characters
+            ),
+            # 임베딩 텍스트 (감사 추적용)
+            "embedding_text": doc.embedding_text,
+            # ── KOBIS 보강 필드 ──
+            "kobis_movie_cd": doc.kobis_movie_cd,
+            "sales_acc": doc.sales_acc,
+            "screen_count": doc.screen_count,
+            "kobis_genres": doc.kobis_genres,
+            "kobis_nation": doc.kobis_nation,
+            "kobis_watch_grade": doc.kobis_watch_grade,
+            "kobis_open_dt": doc.kobis_open_dt,
+            "kobis_type_nm": doc.kobis_type_nm,
+            # KOBIS 감독/배우/회사/스태프 (검색용 텍스트)
+            "kobis_directors": " ".join(
+                d.get("peopleNm", "") for d in doc.kobis_directors
+            ),
+            "kobis_actors": " ".join(
+                f"{a.get('peopleNm', '')}({a.get('cast', '')})"
+                for a in doc.kobis_actors
+            ),
+            "kobis_companies": " ".join(
+                f"{c.get('companyNm', '')}({c.get('companyPartNm', '')})"
+                for c in doc.kobis_companies
+            ),
+            "kobis_staffs": " ".join(
+                f"{s.get('peopleNm', '')}({s.get('staffRoleNm', '')})"
+                for s in doc.kobis_staffs
+            ),
+            # ── 데이터 출처 ──
+            "source": doc.source,
         },
     }
 

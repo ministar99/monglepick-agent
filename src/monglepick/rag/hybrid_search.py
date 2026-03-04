@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import structlog
+from langsmith import traceable
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
 from monglepick.config import settings
@@ -41,6 +42,7 @@ class SearchResult:
 # 1. Qdrant 벡터 검색
 # ============================================================
 
+@traceable(name="search_qdrant", run_type="retriever", metadata={"db": "qdrant", "type": "vector"})
 async def search_qdrant(
     query: str,
     top_k: int = 30,
@@ -76,10 +78,10 @@ async def search_qdrant(
 
     query_filter = Filter(must=conditions) if conditions else None
 
-    # 벡터 검색 실행
-    results = await client.search(
+    # 벡터 검색 실행 (qdrant-client v1.17+: search → query_points)
+    response = await client.query_points(
         collection_name=settings.QDRANT_COLLECTION,
-        query_vector=query_vector,
+        query=query_vector,
         query_filter=query_filter,
         limit=top_k,
         with_payload=True,
@@ -93,7 +95,7 @@ async def search_qdrant(
             source="qdrant",
             metadata=dict(hit.payload) if hit.payload else {},
         )
-        for hit in results
+        for hit in response.points
     ]
 
 
@@ -101,6 +103,7 @@ async def search_qdrant(
 # 2. Elasticsearch BM25 검색
 # ============================================================
 
+@traceable(name="search_elasticsearch", run_type="retriever", metadata={"db": "elasticsearch", "type": "bm25"})
 async def search_elasticsearch(
     query: str,
     top_k: int = 20,
@@ -180,6 +183,7 @@ async def search_elasticsearch(
 # 3. Neo4j 그래프 검색
 # ============================================================
 
+@traceable(name="search_neo4j", run_type="retriever", metadata={"db": "neo4j", "type": "graph"})
 async def search_neo4j(
     mood_tags: list[str] | None = None,
     genres: list[str] | None = None,
@@ -353,6 +357,7 @@ def reciprocal_rank_fusion(
 # 통합 하이브리드 검색 인터페이스
 # ============================================================
 
+@traceable(name="hybrid_search", run_type="chain", metadata={"fusion": "RRF", "k": 60})
 async def hybrid_search(
     query: str,
     top_k: int = 15,

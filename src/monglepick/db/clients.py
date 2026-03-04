@@ -7,6 +7,7 @@ DB 클라이언트 초기화 및 컬렉션/인덱스 설정.
 
 from __future__ import annotations
 
+import aiomysql
 import structlog
 from elasticsearch import AsyncElasticsearch
 from neo4j import AsyncGraphDatabase, AsyncDriver
@@ -28,6 +29,7 @@ _qdrant_client: AsyncQdrantClient | None = None
 _neo4j_driver: AsyncDriver | None = None
 _redis_client: Redis | None = None
 _es_client: AsyncElasticsearch | None = None
+_mysql_pool: aiomysql.Pool | None = None
 
 
 # ============================================================
@@ -77,8 +79,16 @@ async def ensure_qdrant_collection() -> None:
         )
         logger.info("qdrant_collection_created", name=collection_name)
 
-    # Payload 인덱스 설정 (§10-2-1: 8개 필터 필드)
-    keyword_fields = ["title", "genres", "director", "mood_tags", "ott_platforms"]
+    # Payload 인덱스 설정 (§10-2-1: 필터 필드)
+    # Phase C: 모든 필터 가능 필드에 인덱스 설정 (검색 성능 최적화)
+    keyword_fields = [
+        "title", "genres", "director", "mood_tags", "ott_platforms", "certification",
+        "original_language", "production_countries", "status", "collection_name",
+        # Phase C 추가: cast, keywords, origin_country, imdb_id
+        "cast", "keywords", "origin_country", "imdb_id", "source",
+        # KOBIS 보강: 필터링 가능 필드
+        "kobis_movie_cd", "kobis_genres", "kobis_nation", "kobis_watch_grade", "kobis_type_nm",
+    ]
     for field in keyword_fields:
         await client.create_payload_index(
             collection_name=collection_name,
@@ -86,7 +96,13 @@ async def ensure_qdrant_collection() -> None:
             field_schema=PayloadSchemaType.KEYWORD,
         )
 
-    integer_fields = ["release_year"]
+    # Phase C: 모든 정수 필터 필드
+    integer_fields = [
+        "release_year", "collection_id", "budget", "revenue", "vote_count",
+        "runtime", "audience_count", "director_id",
+        # KOBIS 보강: 매출/스크린 수
+        "sales_acc", "screen_count",
+    ]
     for field in integer_fields:
         await client.create_payload_index(
             collection_name=collection_name,
@@ -137,6 +153,10 @@ async def ensure_neo4j_indexes() -> None:
             "CREATE CONSTRAINT IF NOT EXISTS FOR (k:Keyword) REQUIRE k.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (mt:MoodTag) REQUIRE mt.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (o:OTTPlatform) REQUIRE o.name IS UNIQUE",
+            # Phase B: 새 노드 타입 제약조건
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (s:Studio) REQUIRE s.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Collection) REQUIRE c.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (co:Country) REQUIRE co.iso_code IS UNIQUE",
         ]
         for cypher in constraints:
             await session.run(cypher)
@@ -158,6 +178,39 @@ async def get_redis() -> Redis:
         )
         logger.info("redis_client_initialized", url=settings.REDIS_URL)
     return _redis_client
+
+
+# ============================================================
+# MySQL
+# ============================================================
+
+async def get_mysql() -> aiomysql.Pool:
+    """
+    MySQL 비동기 커넥션 풀을 반환한다 (싱글턴).
+
+    aiomysql.create_pool()로 커넥션 풀을 생성하며, 최소 1개 / 최대 10개 연결을 유지한다.
+    charset은 utf8mb4로 설정하여 한국어/이모지를 지원한다.
+    """
+    global _mysql_pool
+    if _mysql_pool is None:
+        _mysql_pool = await aiomysql.create_pool(
+            host=settings.MYSQL_HOST,
+            port=settings.MYSQL_PORT,
+            user=settings.MYSQL_USER,
+            password=settings.MYSQL_PASSWORD,
+            db=settings.MYSQL_DATABASE,
+            charset="utf8mb4",
+            minsize=1,
+            maxsize=10,
+            autocommit=True,
+        )
+        logger.info(
+            "mysql_pool_initialized",
+            host=settings.MYSQL_HOST,
+            port=settings.MYSQL_PORT,
+            db=settings.MYSQL_DATABASE,
+        )
+    return _mysql_pool
 
 
 # ============================================================
@@ -207,6 +260,7 @@ ES_INDEX_SETTINGS = {
     # 검색 쿼리에서 title^3, director^2.5, title_en^2, cast^2, keywords^1.5 적용
     "mappings": {
         "properties": {
+            # ── 기본 메타데이터 (text: 검색 대상) ──
             "id": {"type": "keyword"},
             "title": {"type": "text", "analyzer": "korean_analyzer"},
             "title_en": {"type": "text", "analyzer": "standard"},
@@ -220,6 +274,70 @@ ES_INDEX_SETTINGS = {
             "release_year": {"type": "integer"},
             "rating": {"type": "float"},
             "popularity_score": {"type": "float"},
+            "runtime": {"type": "integer"},
+            "poster_path": {"type": "keyword"},
+            # ── Phase A: 리뷰/트레일러/관람등급 ──
+            "reviews": {"type": "text", "analyzer": "korean_analyzer"},
+            "certification": {"type": "keyword"},
+            "trailer_url": {"type": "keyword"},
+            "vote_count": {"type": "integer"},
+            "behind_the_scenes": {"type": "keyword"},  # URL 목록
+            "similar_movie_ids": {"type": "keyword"},  # ID 목록
+            # ── KMDb 보강 필드 ──
+            "awards": {"type": "text", "analyzer": "korean_analyzer"},
+            "filming_location": {"type": "text", "analyzer": "korean_analyzer"},
+            "audience_count": {"type": "long"},
+            # ── Phase B: 텍스트 검색 필드 ──
+            "tagline": {"type": "text", "analyzer": "korean_analyzer"},
+            "collection_name": {"type": "text", "analyzer": "korean_analyzer"},
+            "production_companies": {"type": "text", "analyzer": "standard"},
+            "screenwriters": {"type": "text", "analyzer": "korean_analyzer"},
+            "cinematographer": {"type": "text", "analyzer": "korean_analyzer"},
+            "composer": {"type": "text", "analyzer": "korean_analyzer"},
+            "producers": {"type": "text", "analyzer": "korean_analyzer"},
+            "editor": {"type": "text", "analyzer": "korean_analyzer"},
+            # ── Phase B: 필터링 필드 ──
+            "original_language": {"type": "keyword"},
+            "production_countries": {"type": "keyword"},
+            "budget": {"type": "long"},
+            "revenue": {"type": "long"},
+            "adult": {"type": "boolean"},
+            "status": {"type": "keyword"},
+            "collection_id": {"type": "integer"},
+            "imdb_id": {"type": "keyword"},
+            "spoken_languages": {"type": "keyword"},
+            "backdrop_path": {"type": "keyword"},
+            "homepage": {"type": "keyword"},
+            # ── Phase C: 완전 데이터 추출 ──
+            "origin_country": {"type": "keyword"},
+            "director_id": {"type": "integer"},
+            "alternative_titles": {"type": "text", "analyzer": "korean_analyzer"},
+            "recommendation_ids": {"type": "keyword"},
+            "kr_release_date": {"type": "keyword"},
+            "video_flag": {"type": "boolean"},
+            "executive_producers": {"type": "text", "analyzer": "korean_analyzer"},
+            "production_designer": {"type": "text", "analyzer": "korean_analyzer"},
+            "costume_designer": {"type": "text", "analyzer": "korean_analyzer"},
+            "source_author": {"type": "text", "analyzer": "korean_analyzer"},
+            "production_country_names": {"type": "keyword"},
+            "spoken_language_names": {"type": "keyword"},
+            "cast_characters": {"type": "text", "analyzer": "korean_analyzer"},
+            "embedding_text": {"type": "text", "analyzer": "korean_analyzer"},
+            # ── KOBIS 보강 필드 ──
+            "kobis_movie_cd": {"type": "keyword"},
+            "sales_acc": {"type": "long"},
+            "screen_count": {"type": "integer"},
+            "kobis_genres": {"type": "keyword"},
+            "kobis_nation": {"type": "keyword"},
+            "kobis_watch_grade": {"type": "keyword"},
+            "kobis_open_dt": {"type": "keyword"},
+            "kobis_type_nm": {"type": "keyword"},
+            "kobis_directors": {"type": "text", "analyzer": "korean_analyzer"},
+            "kobis_actors": {"type": "text", "analyzer": "korean_analyzer"},
+            "kobis_companies": {"type": "text", "analyzer": "korean_analyzer"},
+            "kobis_staffs": {"type": "text", "analyzer": "korean_analyzer"},
+            # ── 데이터 출처 ──
+            "source": {"type": "keyword"},
         }
     },
 }
@@ -260,6 +378,7 @@ async def init_all_clients() -> None:
     await get_neo4j()
     await get_redis()
     await get_elasticsearch()
+    await get_mysql()
 
     await ensure_qdrant_collection()
     await ensure_neo4j_indexes()
@@ -270,7 +389,7 @@ async def init_all_clients() -> None:
 
 async def close_all_clients() -> None:
     """모든 DB 클라이언트 연결을 정리한다."""
-    global _qdrant_client, _neo4j_driver, _redis_client, _es_client
+    global _qdrant_client, _neo4j_driver, _redis_client, _es_client, _mysql_pool
 
     if _qdrant_client is not None:
         await _qdrant_client.close()
@@ -287,5 +406,10 @@ async def close_all_clients() -> None:
     if _es_client is not None:
         await _es_client.close()
         _es_client = None
+
+    if _mysql_pool is not None:
+        _mysql_pool.close()
+        await _mysql_pool.wait_closed()
+        _mysql_pool = None
 
     logger.info("all_db_clients_closed")

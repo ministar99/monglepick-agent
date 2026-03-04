@@ -22,7 +22,12 @@ class Settings(BaseSettings):
     TMDB_API_KEY: str = ""
     TMDB_BASE_URL: str = "https://api.themoviedb.org/3"
     KOBIS_API_KEY: str = ""
+    KOBIS_BASE_URL: str = "http://www.kobis.or.kr/kobisopenapi/webservice/rest"
     KAKAO_API_KEY: str = ""
+
+    # ── KMDb (한국영화 데이터베이스) ──
+    KMDB_API_KEY: str = ""
+    KMDB_BASE_URL: str = "http://api.koreafilm.or.kr/openapi-data2/wisenut/search_api/search_json2.jsp"
 
     # ── Ollama (로컬 LLM 서버) ──
     OLLAMA_BASE_URL: str = "http://localhost:11434"
@@ -63,12 +68,24 @@ class Settings(BaseSettings):
     CONVERSATION_MODEL: str = "exaone-32b:latest"
     # 경량 한국어 생성: EXAONE 4.0 32B (1.2B 미다운로드, 32B로 대체)
     QUESTION_MODEL: str = "exaone-32b:latest"
+    # 추천 이유 생성: EXAONE 4.0 32B (자연어 설명)
+    EXPLANATION_MODEL: str = "exaone-32b:latest"
     # Vision (포스터 분석): Qwen2.5 VL 32B
     VISION_MODEL: str = "qwen2.5vl:32b"
 
     # ── Session / Conversation ──
     SESSION_TTL_DAYS: int = 30
     MAX_CONVERSATION_TURNS: int = 20
+
+    # ── LangSmith (LLM 관측성 + 트레이싱) ──
+    # LangSmith 트레이싱 활성화 여부 (True이면 LLM 호출/그래프 실행 자동 추적)
+    LANGCHAIN_TRACING_V2: bool = False
+    # LangSmith API 키 (https://smith.langchain.com 에서 발급)
+    LANGCHAIN_API_KEY: str = ""
+    # LangSmith 프로젝트 이름 (대시보드에서 프로젝트별 분류)
+    LANGCHAIN_PROJECT: str = "monglepick-agent"
+    # LangSmith 엔드포인트 (기본값 사용, SaaS)
+    LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
 
     # ── Security ──
     SERVICE_API_KEY: str = ""

@@ -10,7 +10,6 @@ dependencies = [
     "sse-starlette>=2.1.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
-
     # ── LLM / Agent ──
     "langchain>=0.3.0",
     "langchain-core>=0.3.0",
@@ -21,36 +20,30 @@ dependencies = [
     "langgraph-checkpoint-redis>=0.1.0",
     "openai>=1.50.0",
     "anthropic>=0.37.0",
-
     # ── Vector DB (Qdrant) ──
     "qdrant-client>=1.12.0",
     "langchain-qdrant>=0.2.0",
-
     # ── Graph DB (Neo4j) ──
     "neo4j>=5.25.0",
     "langchain-neo4j>=0.1.0",
-
     # ── Search (Elasticsearch) ──
     "elasticsearch>=8.15.0,<9.0.0",  # ES 서버 8.17.0과 호환
-
     # ── Cache (Redis) ──
     "redis>=5.2.0",
-
     # ── RDB (MySQL) ──
     "aiomysql>=0.2.0",
     "sqlalchemy[asyncio]>=2.0.0",
     "cryptography>=43.0.0",
-
     # ── Embedding (Upstage Solar — OpenAI 호환 API 사용) ──
-
     # ── Ollama (로컬 LLM) ──
     "langchain-ollama>=0.3.0",
-
     # ── Data Pipeline ──
     "httpx>=0.27.0",
     "pandas>=2.2.0",
     "scipy>=1.14.0",
     "scikit-learn>=1.5.0",
+    # ── Observability (LangSmith 트레이싱) ──
+    "langsmith>=0.7.6",
 
     # ── Utilities ──
     "python-dotenv>=1.0.0",
