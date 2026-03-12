@@ -20,7 +20,7 @@ LangGraph StateGraph의 각 노드로 등록되는 13개 async 함수.
 10. response_formatter         — 응답 포맷팅 (추천/질문/일반/에러)
 11. error_handler              — 에러 처리 + 친절한 안내 메시지
 12. general_responder          — 일반 대화 응답 (몽글 페르소나)
-13. tool_executor_node         — 도구 실행 (Phase 6 스텁)
+13. tool_executor_node         — 도구 실행 
 """
 
 from __future__ import annotations

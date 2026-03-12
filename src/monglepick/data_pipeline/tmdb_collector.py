@@ -31,8 +31,57 @@ from monglepick.data_pipeline.models import TMDBRawMovie
 
 logger = structlog.get_logger()
 
-# TMDB API Rate Limit: 10초당 40회 → 여유있게 35로 제한
-_semaphore = asyncio.Semaphore(35)
+# ── TMDB API Rate Limiter (슬라이딩 윈도우) ──
+# TMDB Rate Limit: 10초당 40회 (2024년 이후 50 req/sec로 상향 가능)
+# 단순 Semaphore 대신 슬라이딩 윈도우로 정확한 Rate Limit 준수 + 동시 요청 지원
+
+
+class _RateLimiter:
+    """
+    슬라이딩 윈도우 기반 API Rate Limiter.
+
+    TMDB API의 Rate Limit를 준수하면서도 동시 요청을 통해 최대 처리량을 달성한다.
+    asyncio.Lock은 첫 사용 시 지연 초기화된다 (모듈 임포트 시 이벤트 루프 불필요).
+
+    Args:
+        max_requests: 윈도우 내 최대 요청 수 (기본: 35)
+        window: 윈도우 크기(초) (기본: 10.0)
+    """
+
+    def __init__(self, max_requests: int = 35, window: float = 10.0) -> None:
+        self._max = max_requests
+        self._window = window
+        self._times: list[float] = []
+        self._lock: asyncio.Lock | None = None
+
+    async def acquire(self) -> None:
+        """
+        요청 슬롯 확보. 윈도우 내 요청 수가 max_requests 미만이 될 때까지 대기.
+
+        동작 원리:
+        1. 윈도우(10초) 밖의 오래된 타임스탬프 제거
+        2. 현재 윈도우 내 요청 수 < max_requests → 즉시 통과
+        3. 윈도우가 가득 찬 경우 → 가장 오래된 요청이 윈도우를 벗어날 때까지 대기
+        """
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        while True:
+            async with self._lock:
+                now = asyncio.get_event_loop().time()
+                cutoff = now - self._window
+                # 윈도우 밖의 오래된 타임스탬프 제거
+                self._times = [t for t in self._times if t > cutoff]
+                if len(self._times) < self._max:
+                    self._times.append(now)
+                    return
+                # 가장 오래된 요청이 윈도우를 벗어날 때까지 대기
+                wait = self._times[0] + self._window - now + 0.05
+            await asyncio.sleep(max(0.01, wait))
+
+
+# 기본 Rate Limiter: 초당 45회 (TMDB 2024년 이후 50 req/sec, 여유분 확보)
+# 429 응답 시 tenacity @retry가 지수 백오프로 자동 재시도
+_rate_limiter = _RateLimiter(max_requests=45, window=1.0)
 
 # ── Phase D: 전체 수집 관련 상수 ──
 # Daily Export 파일 URL 템플릿 (TMDB가 매일 08:00 UTC에 생성)
@@ -100,12 +149,16 @@ class TMDBCollector:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=8))
     async def _get(self, path: str, params: dict | None = None) -> dict:
-        """Rate-limited GET 요청. 최대 3회 재시도 (지수 백오프)."""
-        async with _semaphore:
-            assert self._client is not None, "TMDBCollector must be used as async context manager"
-            resp = await self._client.get(path, params=params or {})
-            resp.raise_for_status()
-            return resp.json()
+        """
+        Rate-limited GET 요청. 슬라이딩 윈도우 Rate Limiter + 최대 3회 재시도 (지수 백오프).
+
+        재시도 시에도 Rate Limiter 슬롯을 새로 확보하므로 Rate Limit을 초과하지 않는다.
+        """
+        await _rate_limiter.acquire()
+        assert self._client is not None, "TMDBCollector must be used as async context manager"
+        resp = await self._client.get(path, params=params or {})
+        resp.raise_for_status()
+        return resp.json()
 
     # ── 목록 수집 메서드 ──
 
@@ -554,24 +607,27 @@ class TMDBCollector:
         movie_ids: list[int],
         batch_size: int = 1000,
         save_interval: int = 100,
+        max_workers: int = 20,
     ) -> dict:
         """
-        체크포인트 기반으로 전체 영화 상세정보를 수집한다.
+        체크포인트 기반으로 전체 영화 상세정보를 **동시** 수집한다.
 
         며칠에 걸쳐 수집을 중단/재개할 수 있도록 체크포인트 파일에 진행 상태를 기록한다.
         수집된 데이터는 JSONL 형식으로 저장되어 메모리 부담 없이 대량 데이터를 처리한다.
 
         동작 흐름:
         1. 체크포인트 파일에서 마지막 수집 위치를 로드
-        2. 남은 ID 목록에서 순차적으로 collect_movie_details_full() 호출
-        3. save_interval마다 JSONL에 flush + 체크포인트 갱신
-        4. 개별 영화 실패 시 failed_ids에 기록하고 계속 진행
-        5. 모든 ID 처리 완료 또는 KeyboardInterrupt 시 최종 체크포인트 저장
+        2. max_workers개 비동기 워커가 큐에서 영화 ID를 꺼내 동시 수집
+        3. _RateLimiter가 TMDB Rate Limit(10초당 35회) 준수
+        4. save_interval마다 JSONL에 flush + 체크포인트 갱신
+        5. 개별 영화 실패 시 failed_ids에 기록하고 계속 진행
+        6. 모든 ID 처리 완료 또는 KeyboardInterrupt 시 최종 체크포인트 저장
 
         Args:
             movie_ids: 수집할 전체 영화 ID 리스트
             batch_size: 로그 출력 간격 (기본 1000)
             save_interval: JSONL flush + 체크포인트 저장 간격 (기본 100)
+            max_workers: 동시 수집 워커 수 (기본 20)
 
         Returns:
             수집 결과 요약 dict:
@@ -589,7 +645,6 @@ class TMDBCollector:
         checkpoint = self._load_checkpoint()
         collected_ids: set[int] = set(checkpoint.get("collected_ids", []))
         failed_ids: set[int] = set(checkpoint.get("failed_ids", []))
-        total_collected = len(collected_ids)
 
         # 이미 수집된 ID를 제외한 남은 ID 목록
         remaining_ids = [mid for mid in movie_ids if mid not in collected_ids and mid not in failed_ids]
@@ -601,6 +656,7 @@ class TMDBCollector:
             remaining=len(remaining_ids),
             already_collected=len(collected_ids),
             already_failed=len(failed_ids),
+            max_workers=max_workers,
         )
 
         if not remaining_ids:
@@ -613,57 +669,96 @@ class TMDBCollector:
                 "output_file": str(_MOVIES_JSONL),
             }
 
-        # ── JSONL 파일에 append 모드로 수집 데이터 기록 ──
+        # ── 동시 수집: Queue + Worker 패턴 ──
         new_collected = 0
         new_failed = 0
+        write_lock = asyncio.Lock()
 
         try:
             with open(_MOVIES_JSONL, "a", encoding="utf-8") as jsonl_file:
-                for i, mid in enumerate(remaining_ids):
-                    try:
-                        # 14개 서브리소스를 포함한 전체 상세 수집 (1회 API 호출)
-                        movie = await self.collect_movie_details_full(mid)
+                # 워커 큐: maxsize로 메모리 사용량 제한 (워커 수 × 2)
+                queue: asyncio.Queue[int | None] = asyncio.Queue(maxsize=max_workers * 2)
 
-                        # JSONL에 한 줄로 기록 (Pydantic model_dump → JSON)
-                        json_line = json.dumps(movie.model_dump(), ensure_ascii=False)
-                        jsonl_file.write(json_line + "\n")
+                async def worker() -> None:
+                    """
+                    워커: 큐에서 영화 ID를 꺼내 상세정보를 수집한다.
 
-                        collected_ids.add(mid)
-                        new_collected += 1
+                    각 워커는 독립적으로 동작하며, _RateLimiter가 전체 처리량을 제어한다.
+                    JSONL 쓰기와 체크포인트 저장은 write_lock으로 동기화한다.
+                    None (poison pill)을 받으면 종료한다.
+                    """
+                    nonlocal new_collected, new_failed
 
-                    except httpx.HTTPStatusError as e:
-                        # 404: 삭제된 영화, 기타 HTTP 에러
-                        if e.response.status_code == 404:
-                            logger.debug("movie_not_found", movie_id=mid)
-                        else:
-                            logger.warning(
-                                "movie_detail_http_error",
-                                movie_id=mid,
-                                status=e.response.status_code,
-                            )
-                        failed_ids.add(mid)
-                        new_failed += 1
+                    while True:
+                        mid = await queue.get()
+                        # 종료 신호 (poison pill)
+                        if mid is None:
+                            queue.task_done()
+                            return
 
-                    except Exception as e:
-                        logger.warning("movie_detail_error", movie_id=mid, error=str(e))
-                        failed_ids.add(mid)
-                        new_failed += 1
+                        try:
+                            # 14개 서브리소스를 포함한 전체 상세 수집 (1회 API 호출)
+                            movie = await self.collect_movie_details_full(mid)
 
-                    # ── 주기적 체크포인트 저장 + 로그 ──
-                    if (i + 1) % save_interval == 0:
-                        jsonl_file.flush()
-                        self._save_checkpoint(collected_ids, failed_ids)
+                            # JSONL에 한 줄로 기록 (Pydantic model_dump → JSON)
+                            json_line = json.dumps(movie.model_dump(), ensure_ascii=False)
 
-                    if (i + 1) % batch_size == 0:
-                        total_now = len(collected_ids)
-                        elapsed_pct = (i + 1) / len(remaining_ids) * 100
-                        logger.info(
-                            "full_collection_progress",
-                            progress=f"{i + 1}/{len(remaining_ids)}",
-                            percent=f"{elapsed_pct:.1f}%",
-                            total_collected=total_now,
-                            new_failed=new_failed,
-                        )
+                            async with write_lock:
+                                jsonl_file.write(json_line + "\n")
+                                collected_ids.add(mid)
+                                new_collected += 1
+
+                                # ── 주기적 체크포인트 저장 + 로그 ──
+                                count = new_collected + new_failed
+                                if count % save_interval == 0:
+                                    jsonl_file.flush()
+                                    self._save_checkpoint(collected_ids, failed_ids)
+                                if count % batch_size == 0:
+                                    logger.info(
+                                        "full_collection_progress",
+                                        progress=f"{count}/{len(remaining_ids)}",
+                                        percent=f"{count / len(remaining_ids) * 100:.1f}%",
+                                        total_collected=len(collected_ids),
+                                        new_failed=new_failed,
+                                    )
+
+                        except httpx.HTTPStatusError as e:
+                            # 404: 삭제된 영화, 기타 HTTP 에러
+                            if e.response.status_code == 404:
+                                logger.debug("movie_not_found", movie_id=mid)
+                            else:
+                                logger.warning(
+                                    "movie_detail_http_error",
+                                    movie_id=mid,
+                                    status=e.response.status_code,
+                                )
+                            async with write_lock:
+                                failed_ids.add(mid)
+                                new_failed += 1
+
+                        except Exception as e:
+                            logger.warning("movie_detail_error", movie_id=mid, error=str(e))
+                            async with write_lock:
+                                failed_ids.add(mid)
+                                new_failed += 1
+
+                        finally:
+                            queue.task_done()
+
+                # ── 워커 태스크 시작 ──
+                worker_tasks = [asyncio.create_task(worker()) for _ in range(max_workers)]
+
+                # ── 큐에 영화 ID 공급 ──
+                # queue.put()은 maxsize에 도달하면 자동 대기 (배압 제어)
+                for mid in remaining_ids:
+                    await queue.put(mid)
+
+                # ── 종료 신호 전송 (각 워커에 None 전달) ──
+                for _ in range(max_workers):
+                    await queue.put(None)
+
+                # ── 모든 워커 완료 대기 ──
+                await asyncio.gather(*worker_tasks)
 
         except KeyboardInterrupt:
             # Ctrl+C로 중단 시에도 체크포인트를 저장하여 다음 실행에서 이어갈 수 있도록

@@ -1,0 +1,96 @@
+# =========================================
+# 몽글픽 AI Agent CI/CD 워크플로우
+# =========================================
+# PR/push → pytest 테스트 + ruff 린트 (GitHub 호스팅 러너)
+# develop push → 스테이징 맥북에서 직접 배포 (Self-hosted 러너)
+#
+# 사전 준비:
+#   스테이징 맥북에 GitHub Actions self-hosted runner 설치 완료
+#   PROJECT_DIR 환경변수를 러너 환경에 설정 (또는 아래 기본값 수정)
+
+name: CI/CD
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+# 동시 배포 방지 (같은 브랜치에서 중복 배포 차단)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── CI: 테스트 + 린트 (GitHub 호스팅 러너) ───
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Python 3.12 설치
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # uv 패키지 매니저 설치
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      # 의존성 설치
+      - name: Install dependencies
+        run: uv sync
+
+      # 린트 체크 (ruff)
+      - name: Lint
+        run: uv run --with ruff -- ruff check src/
+
+      # 테스트 실행 (308개 테스트, Ollama/DB 불필요)
+      - name: Test
+        run: |
+          PYTHONPATH=src uv run --with pytest --with pytest-asyncio --with httpx \
+            -- python -m pytest tests/ -v --tb=short -q
+
+  # ─── CD: 스테이징 배포 (Self-hosted 러너에서 직접 실행) ───
+  deploy:
+    name: Deploy to Staging
+    needs: test
+    runs-on: self-hosted
+    timeout-minutes: 10
+    # develop 브랜치 push 시에만 배포
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+
+    steps:
+      - name: Deploy Agent container
+        run: |
+          set -e
+          echo "========== AI Agent 배포 시작 =========="
+
+          PROJECT_DIR="${PROJECT_DIR:-/Users/yoonhyungjoo/Documents/monglepick}"
+          cd "$PROJECT_DIR"
+
+          # 최신 코드 pull
+          cd monglepick-agent
+          git pull origin develop
+          cd ..
+
+          # Agent 컨테이너만 재빌드 + 재시작 (DB 건드리지 않음)
+          docker compose -f docker-compose.staging.yml up -d --build --no-deps ai-agent
+
+          # 헬스체크 대기 (최대 30초)
+          echo ">>> Agent 헬스체크 대기..."
+          for i in 1 2 3 4 5 6; do
+            if curl -sf "http://localhost:8000/health" > /dev/null 2>&1; then
+              echo "  ✅ Agent OK"
+              break
+            fi
+            echo "  ⏳ Agent starting... ($i/6)"
+            sleep 5
+          done
+
+          echo "========== ✅ AI Agent 배포 완료 =========="
