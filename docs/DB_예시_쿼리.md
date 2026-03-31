@@ -320,8 +320,8 @@ LIMIT 20;
 
 | DB | 건수 |
 |---|---|
-| Qdrant | 157,194 벡터 |
-| Neo4j | 157,194 Movie + 222,302 Person |
-| Elasticsearch | 157,194 문서 |
+| Qdrant | 910,140 벡터 |
+| Neo4j | 910,140 Movie + 222,302 Person |
+| Elasticsearch | 910,140 문서 |
 | Redis | 586,647 CF 캐시 키 |
-| MySQL | 157,194 movies + 26,010,786 watch_history + 270,888 users |
+| MySQL | 910,140 movies + 26,010,786 watch_history + 270,888 users |

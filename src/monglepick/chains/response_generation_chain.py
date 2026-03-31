@@ -14,6 +14,7 @@ Solar API가 분석/처리한 데이터(추천 영화, 추천 이유, 감정, �
 
 from __future__ import annotations
 
+import asyncio
 import time
 import traceback
 
@@ -220,6 +221,9 @@ async def generate_recommendation_response(
         user_message_preview=user_message[:50],
     )
 
+    # vLLM/LLM 응답 생성 타임아웃 (초) — 연결 실패 시 빠른 폴백 전환
+    _RESPONSE_GEN_TIMEOUT = 30.0
+
     try:
         llm_start = time.perf_counter()
         prompt_value = await prompt.ainvoke(inputs)
@@ -228,9 +232,12 @@ async def generate_recommendation_response(
             prompt_preview=str(prompt_value)[:300],
         )
 
-        # 몽글이 호출 (세마포어 적용)
-        response = await guarded_ainvoke(
-            llm, prompt_value, model=settings.CONVERSATION_MODEL,
+        # 몽글이 호출 (세마포어 적용 + 30초 타임아웃)
+        response = await asyncio.wait_for(
+            guarded_ainvoke(
+                llm, prompt_value, model=settings.CONVERSATION_MODEL,
+            ),
+            timeout=_RESPONSE_GEN_TIMEOUT,
         )
         elapsed_ms = (time.perf_counter() - llm_start) * 1000
 
@@ -246,6 +253,15 @@ async def generate_recommendation_response(
             model=settings.CONVERSATION_MODEL,
         )
         return text
+
+    except asyncio.TimeoutError:
+        logger.error(
+            "response_generation_timeout",
+            timeout_sec=_RESPONSE_GEN_TIMEOUT,
+            movie_count=len(ranked_movies),
+        )
+        # 폴백: Solar 데이터를 기계적으로 조합
+        return _build_fallback_response(ranked_movies, emotion)
 
     except Exception as e:
         logger.error(
@@ -308,12 +324,19 @@ async def generate_question_response(
         emotion=emotion,
     )
 
+    # vLLM/LLM 후속 질문 생성 타임아웃 (초)
+    _QUESTION_GEN_TIMEOUT = 30.0
+
     try:
         llm_start = time.perf_counter()
         prompt_value = await prompt.ainvoke(inputs)
 
-        response = await guarded_ainvoke(
-            llm, prompt_value, model=settings.CONVERSATION_MODEL,
+        # 몽글이 호출 (세마포어 적용 + 30초 타임아웃)
+        response = await asyncio.wait_for(
+            guarded_ainvoke(
+                llm, prompt_value, model=settings.CONVERSATION_MODEL,
+            ),
+            timeout=_QUESTION_GEN_TIMEOUT,
         )
         elapsed_ms = (time.perf_counter() - llm_start) * 1000
 
@@ -327,6 +350,14 @@ async def generate_question_response(
             model=settings.CONVERSATION_MODEL,
         )
         return text
+
+    except asyncio.TimeoutError:
+        logger.error(
+            "question_response_timeout",
+            timeout_sec=_QUESTION_GEN_TIMEOUT,
+        )
+        # 폴백: Solar 질문 그대로 반환
+        return question
 
     except Exception as e:
         logger.error(

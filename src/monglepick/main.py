@@ -16,6 +16,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from monglepick.api.admin import admin_router
 from monglepick.api.chat import chat_router
 from monglepick.api.match import match_router
 from monglepick.api.middleware import RateLimitMiddleware, TimeoutMiddleware
@@ -168,8 +169,11 @@ async def lifespan(app: FastAPI):
         )
 
     # ── [2] Ollama 모델 warmup ──
-    # 앱 시작 시 두 모델에 dummy 호출을 수행하여 cold start를 제거한다.
-    await _warmup_ollama_models()
+    # local_only 모드에서만 실행 (hybrid/api_only에서는 Ollama 미사용)
+    if settings.LLM_MODE == "local_only":
+        await _warmup_ollama_models()
+    else:
+        logger.info("ollama_warmup_skipped", mode=settings.LLM_MODE, reason="Ollama 미사용")
 
     startup_elapsed_ms = (time.perf_counter() - startup_start) * 1000
     logger.info("app_startup_complete", version=APP_VERSION, elapsed_ms=round(startup_elapsed_ms, 1))
@@ -269,6 +273,7 @@ app.add_middleware(RateLimitMiddleware)
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(match_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 
 
 @app.get(
