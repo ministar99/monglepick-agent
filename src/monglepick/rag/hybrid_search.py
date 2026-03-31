@@ -561,48 +561,69 @@ async def hybrid_search(
     es_results: list[SearchResult] = []
     neo4j_results: list[SearchResult] = []
 
+    # 개별 검색 타임아웃 (초) — unhealthy 서비스가 전체 검색을 지연시키는 것을 방지
+    _SEARCH_TIMEOUT = 10.0
+
     async def _safe_search_qdrant() -> list[SearchResult]:
-        """Qdrant 검색 래퍼. 실패 시 빈 리스트 반환."""
+        """Qdrant 검색 래퍼. 실패 또는 타임아웃(10초) 시 빈 리스트 반환."""
         try:
-            return await search_qdrant(
-                query=query,
-                top_k=30,
-                genre_filter=genre_filter,
-                mood_filter=mood_tags,
-                ott_filter=ott_filter,
-                min_rating=min_rating,
-                year_range=year_range,
-                has_trailer=has_trailer,
+            return await asyncio.wait_for(
+                search_qdrant(
+                    query=query,
+                    top_k=30,
+                    genre_filter=genre_filter,
+                    mood_filter=mood_tags,
+                    ott_filter=ott_filter,
+                    min_rating=min_rating,
+                    year_range=year_range,
+                    has_trailer=has_trailer,
+                ),
+                timeout=_SEARCH_TIMEOUT,
             )
+        except asyncio.TimeoutError:
+            logger.warning("qdrant_search_timeout", timeout_sec=_SEARCH_TIMEOUT)
+            return []
         except Exception as e:
             logger.warning("qdrant_search_failed_skipping", error=str(e), error_type=type(e).__name__)
             return []
 
     async def _safe_search_es() -> list[SearchResult]:
-        """ES 검색 래퍼. 실패 시 빈 리스트 반환."""
+        """ES 검색 래퍼. 실패 또는 타임아웃(10초) 시 빈 리스트 반환."""
         try:
-            return await search_elasticsearch(
-                query=query,
-                top_k=20,
-                genre_filter=genre_filter,
-                mood_filter=mood_tags,
-                min_rating=min_rating,
-                has_trailer=has_trailer,
+            return await asyncio.wait_for(
+                search_elasticsearch(
+                    query=query,
+                    top_k=20,
+                    genre_filter=genre_filter,
+                    mood_filter=mood_tags,
+                    min_rating=min_rating,
+                    has_trailer=has_trailer,
+                ),
+                timeout=_SEARCH_TIMEOUT,
             )
+        except asyncio.TimeoutError:
+            logger.warning("es_search_timeout", timeout_sec=_SEARCH_TIMEOUT)
+            return []
         except Exception as e:
             logger.warning("es_search_failed_skipping", error=str(e), error_type=type(e).__name__)
             return []
 
     async def _safe_search_neo4j() -> list[SearchResult]:
-        """Neo4j 검색 래퍼. 실패 시 빈 리스트 반환."""
+        """Neo4j 검색 래퍼. 실패 또는 타임아웃(10초) 시 빈 리스트 반환."""
         try:
-            return await search_neo4j(
-                mood_tags=mood_tags,
-                genres=genre_filter,
-                director=director,
-                similar_to_movie_id=similar_to_movie_id,
-                top_k=15,
+            return await asyncio.wait_for(
+                search_neo4j(
+                    mood_tags=mood_tags,
+                    genres=genre_filter,
+                    director=director,
+                    similar_to_movie_id=similar_to_movie_id,
+                    top_k=15,
+                ),
+                timeout=_SEARCH_TIMEOUT,
             )
+        except asyncio.TimeoutError:
+            logger.warning("neo4j_search_timeout", timeout_sec=_SEARCH_TIMEOUT)
+            return []
         except Exception as e:
             logger.warning("neo4j_search_failed_skipping", error=str(e), error_type=type(e).__name__)
             return []

@@ -1,12 +1,11 @@
 """
-LLM 팩토리 단위 테스트 — 하이브리드 라우팅 (Ollama + Solar API) 대응.
+LLM 팩토리 단위 테스트 (Task 3).
 
 테스트 대상:
 - ChatOllama 생성자 파라미터 전달 검증
 - 동일 파라미터 캐시 히트 (싱글턴)
 - 다른 파라미터 별도 인스턴스
-- LLM_MODE별 라우팅 (local_only / hybrid / api_only)
-- get_intent_llm()이 모드별로 올바른 백엔드를 사용하는지 확인
+- get_intent_llm()이 INTENT_MODEL 사용하는지 확인
 """
 
 from __future__ import annotations
@@ -18,25 +17,19 @@ from monglepick.agents.chat.models import IntentResult
 from monglepick.config import settings
 
 
-def _clear_all_caches():
-    """모든 LLM 캐시를 초기화한다 (테스트 간 격리)."""
-    factory_module._ollama_cache.clear()
-    factory_module._solar_cache.clear()
-    factory_module._structured_cache.clear()
-
-
 class TestGetLlm:
-    """get_llm() / get_ollama_llm() 함수 테스트."""
+    """get_llm() 함수 테스트."""
 
     def setup_method(self):
         """각 테스트 전 캐시 초기화."""
-        _clear_all_caches()
+        factory_module._llm_cache.clear()
+        factory_module._structured_cache.clear()
 
     def test_creates_chat_ollama_with_correct_params(self):
-        """ChatOllama가 올바른 파라미터로 생성된다."""
+        """ChatOllama(Ollama)가 올바른 파라미터로 생성된다."""
         with patch("monglepick.llm.factory.ChatOllama") as mock_cls:
             mock_cls.return_value = MagicMock()
-            factory_module.get_llm(
+            llm = factory_module.get_llm(
                 model="test-model",
                 temperature=0.3,
                 format="json",
@@ -45,8 +38,6 @@ class TestGetLlm:
                 model="test-model",
                 temperature=0.3,
                 base_url=settings.OLLAMA_BASE_URL,
-                num_ctx=settings.OLLAMA_NUM_CTX,
-                keep_alive=settings.OLLAMA_KEEP_ALIVE,
                 format="json",
             )
 
@@ -76,7 +67,7 @@ class TestGetLlm:
             assert llm1 is not llm2
 
     def test_default_values(self):
-        """기본값이 settings.CONVERSATION_MODEL, temp=0.5이다."""
+        """기본값이 settings.CONVERSATION_MODEL, temp=0.5, OLLAMA_BASE_URL이다."""
         with patch("monglepick.llm.factory.ChatOllama") as mock_cls:
             mock_cls.return_value = MagicMock()
             factory_module.get_llm()
@@ -84,8 +75,6 @@ class TestGetLlm:
                 model=settings.CONVERSATION_MODEL,
                 temperature=0.5,
                 base_url=settings.OLLAMA_BASE_URL,
-                num_ctx=settings.OLLAMA_NUM_CTX,
-                keep_alive=settings.OLLAMA_KEEP_ALIVE,
             )
 
 
@@ -94,14 +83,12 @@ class TestGetStructuredLlm:
 
     def setup_method(self):
         """각 테스트 전 캐시 초기화."""
-        _clear_all_caches()
+        factory_module._llm_cache.clear()
+        factory_module._structured_cache.clear()
 
     def test_with_structured_output_called(self):
-        """local_only 모드에서 with_structured_output이 schema와 함께 호출된다."""
-        with (
-            patch("monglepick.llm.factory.ChatOllama") as mock_cls,
-            patch.object(settings, "LLM_MODE", "local_only"),
-        ):
+        """with_structured_output이 schema와 함께 호출된다."""
+        with patch("monglepick.llm.factory.ChatOllama") as mock_cls:
             mock_instance = MagicMock()
             mock_cls.return_value = mock_instance
 
@@ -117,10 +104,7 @@ class TestGetStructuredLlm:
 
     def test_structured_cache_hit(self):
         """동일 schema+model+temp로 호출하면 캐시에서 반환한다."""
-        with (
-            patch("monglepick.llm.factory.ChatOllama") as mock_cls,
-            patch.object(settings, "LLM_MODE", "local_only"),
-        ):
+        with patch("monglepick.llm.factory.ChatOllama") as mock_cls:
             mock_instance = MagicMock()
             mock_cls.return_value = mock_instance
 
@@ -132,49 +116,28 @@ class TestGetStructuredLlm:
 
 
 class TestConvenienceFunctions:
-    """용도별 편의 함수 테스트 — LLM_MODE별 라우팅 검증."""
+    """용도별 편의 함수 테스트."""
 
     def setup_method(self):
-        _clear_all_caches()
+        factory_module._llm_cache.clear()
+        factory_module._structured_cache.clear()
 
-    def test_get_intent_llm_local_only(self):
-        """local_only 모드에서 get_intent_llm()이 settings.INTENT_MODEL(Ollama)을 사용한다."""
-        with (
-            patch("monglepick.llm.factory.ChatOllama") as mock_cls,
-            patch.object(settings, "LLM_MODE", "local_only"),
-        ):
+    def test_get_intent_llm_uses_intent_model(self):
+        """get_intent_llm()이 settings.INTENT_MODEL을 사용한다."""
+        with patch("monglepick.llm.factory.ChatOllama") as mock_cls:
             mock_instance = MagicMock()
             mock_cls.return_value = mock_instance
 
             factory_module.get_intent_llm()
 
-            # Ollama가 INTENT_MODEL로 호출됨
+            # INTENT_MODEL이 사용되었는지 확인
             call_kwargs = mock_cls.call_args[1]
             assert call_kwargs["model"] == settings.INTENT_MODEL
             assert call_kwargs["temperature"] == 0.1
 
-    def test_get_intent_llm_hybrid_uses_solar(self):
-        """hybrid 모드에서 get_intent_llm()이 Solar API를 사용한다."""
-        with (
-            patch("monglepick.llm.factory.ChatOpenAI") as mock_solar_cls,
-            patch.object(settings, "LLM_MODE", "hybrid"),
-        ):
-            mock_solar_instance = MagicMock()
-            mock_solar_cls.return_value = mock_solar_instance
-
-            factory_module.get_intent_llm()
-
-            # Solar API가 호출됨
-            call_kwargs = mock_solar_cls.call_args[1]
-            assert call_kwargs["model"] == settings.SOLAR_API_MODEL
-            assert call_kwargs["base_url"] == settings.SOLAR_API_BASE_URL
-
-    def test_get_conversation_llm_local_only(self):
-        """local_only 모드에서 get_conversation_llm()이 settings.CONVERSATION_MODEL을 사용한다."""
-        with (
-            patch("monglepick.llm.factory.ChatOllama") as mock_cls,
-            patch.object(settings, "LLM_MODE", "local_only"),
-        ):
+    def test_get_conversation_llm_uses_conversation_model(self):
+        """get_conversation_llm()이 settings.CONVERSATION_MODEL을 사용한다."""
+        with patch("monglepick.llm.factory.ChatOllama") as mock_cls:
             mock_cls.return_value = MagicMock()
 
             factory_module.get_conversation_llm()
@@ -183,39 +146,9 @@ class TestConvenienceFunctions:
             assert call_kwargs["model"] == settings.CONVERSATION_MODEL
             assert call_kwargs["temperature"] == 0.5
 
-    def test_get_conversation_llm_hybrid_uses_mongle(self):
-        """hybrid 모드에서 get_conversation_llm()이 몽글이(MONGLE_MODEL)를 사용한다."""
-        with (
-            patch("monglepick.llm.factory.ChatOllama") as mock_cls,
-            patch.object(settings, "LLM_MODE", "hybrid"),
-        ):
-            mock_cls.return_value = MagicMock()
-
-            factory_module.get_conversation_llm()
-
-            call_kwargs = mock_cls.call_args[1]
-            assert call_kwargs["model"] == settings.MONGLE_MODEL
-            assert call_kwargs["temperature"] == settings.MONGLE_TEMPERATURE
-
-    def test_get_conversation_llm_api_only_uses_solar(self):
-        """api_only 모드에서 get_conversation_llm()이 Solar API를 사용한다."""
-        with (
-            patch("monglepick.llm.factory.ChatOpenAI") as mock_solar_cls,
-            patch.object(settings, "LLM_MODE", "api_only"),
-        ):
-            mock_solar_cls.return_value = MagicMock()
-
-            factory_module.get_conversation_llm()
-
-            call_kwargs = mock_solar_cls.call_args[1]
-            assert call_kwargs["model"] == settings.SOLAR_API_MODEL
-
-    def test_get_explanation_llm_local_only(self):
-        """local_only 모드에서 get_explanation_llm()이 settings.EXPLANATION_MODEL을 사용한다."""
-        with (
-            patch("monglepick.llm.factory.ChatOllama") as mock_cls,
-            patch.object(settings, "LLM_MODE", "local_only"),
-        ):
+    def test_get_explanation_llm_uses_explanation_model(self):
+        """get_explanation_llm()이 settings.EXPLANATION_MODEL을 사용한다."""
+        with patch("monglepick.llm.factory.ChatOllama") as mock_cls:
             mock_cls.return_value = MagicMock()
 
             factory_module.get_explanation_llm()

@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     # vLLM 비전 모델 (Qwen2.5-VL-3B, 이미지 분석)
     VLLM_VISION_BASE_URL: str = "http://localhost:18001/v1"
     VLLM_VISION_MODEL: str = "Qwen/Qwen2.5-VL-3B-Instruct"
-    VLLM_TIMEOUT: int = 60
+    VLLM_TIMEOUT: int = 30  # 기존 60 → 30초로 단축 (연결 실패 시 빠른 폴백)
     VLLM_MAX_RETRIES: int = 2
 
     # ── Ollama 서빙 옵션 ──
