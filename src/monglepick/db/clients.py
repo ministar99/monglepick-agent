@@ -112,6 +112,7 @@ async def get_qdrant() -> AsyncQdrantClient:
         _qdrant_client = AsyncQdrantClient(
             url=settings.QDRANT_URL,
             check_compatibility=False,  # 클라이언트/서버 마이너 버전 차이 허용
+            timeout=10,  # 요청 타임아웃 10초 (unhealthy 시 빠른 실패)
         )
         logger.info("qdrant_client_initialized", url=settings.QDRANT_URL)
 
@@ -218,6 +219,9 @@ async def get_neo4j() -> AsyncDriver:
         _neo4j_driver = AsyncGraphDatabase.driver(
             settings.NEO4J_URI,
             auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
+            connection_timeout=5,               # 연결 수립 타임아웃 5초
+            connection_acquisition_timeout=10,   # 풀에서 연결 획득 타임아웃 10초
+            max_connection_lifetime=300,          # 연결 최대 수명 5분
         )
         logger.info("neo4j_driver_initialized", uri=settings.NEO4J_URI)
 

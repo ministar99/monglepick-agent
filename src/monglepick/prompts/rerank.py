@@ -39,7 +39,7 @@ RERANK_SYSTEM_PROMPT = """\
 ## 출력 형식
 각 영화에 대해 다음 JSON 배열로 응답하세요:
 [
-  {"movie_id": "영화ID", "score": 점수, "reason": "한줄 이유"}
+  {{"movie_id": "영화ID", "score": 점수, "reason": "한줄 이유"}}
 ]
 
 점수 내림차순으로 정렬하세요. 0점 영화도 포함하세요."""
