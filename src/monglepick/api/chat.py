@@ -517,8 +517,8 @@ class ChatSyncResponse(BaseModel):
 
 @chat_router.post(
     "/chat",
-    summary="SSE 스트리밍 채팅",
-    response_description="SSE 이벤트 스트림 (text/event-stream)",
+    summary="SSE 스트리밍 채팅 (⚠ Swagger 테스트 불가 → /chat/sync 사용)",
+    response_description="SSE 이벤트 스트림 (text/event-stream). Swagger UI에서는 응답이 끝나지 않으므로 /chat/sync 동기 엔드포인트를 사용하세요.",
     responses={
         200: {
             "description": "SSE 스트리밍 응답. 이벤트 타입: status, movie_card, token, done, error",

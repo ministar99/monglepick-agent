@@ -47,9 +47,10 @@ match_router = APIRouter(tags=["match"])
 
 @match_router.post(
     "/match",
-    summary="Movie Match SSE 스트리밍",
+    summary="Movie Match SSE 스트리밍 (⚠ Swagger 테스트 불가 → /match/sync 사용)",
     description=(
         "두 영화를 선택하면 교집합 특성을 분석하여 함께 볼 영화 5편을 추천한다.\n\n"
+        "**⚠ Swagger UI에서는 SSE 응답이 끝나지 않습니다. `/match/sync` 동기 엔드포인트를 사용하세요.**\n\n"
         "### SSE 이벤트 (5종)\n"
         "- `status`: 각 노드 진행 상태 `{phase, message}`\n"
         "- `shared_features`: 공통 특성 분석 결과 `{common_genres, common_moods, ...}`\n"
@@ -57,7 +58,7 @@ match_router = APIRouter(tags=["match"])
         "- `error`: 에러 정보 `{error_code, message}`\n"
         "- `done`: 스트림 종료 `{}`"
     ),
-    response_description="SSE 이벤트 스트림 (text/event-stream)",
+    response_description="SSE 이벤트 스트림 (text/event-stream). Swagger UI에서는 응답이 끝나지 않으므로 /match/sync 동기 엔드포인트를 사용하세요.",
     responses={
         200: {
             "description": "SSE 이벤트 스트림",
