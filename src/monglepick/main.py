@@ -231,7 +231,12 @@ app = FastAPI(
         "- 시청 이력 26M건, 유저 270K명\n\n"
         "### 기술 스택\n"
         "LangGraph · Ollama (EXAONE 4.0 / Qwen 3.5) · Upstage Solar 임베딩 · "
-        "Qdrant · Neo4j · Elasticsearch · Redis · MySQL"
+        "Qdrant · Neo4j · Elasticsearch · Redis · MySQL\n\n"
+        "### ⚠️ Swagger UI 테스트 안내\n"
+        "- **SSE 엔드포인트** (`/chat`, `/match`)는 Swagger UI에서 "
+        "Try it out 시 응답이 끝나지 않습니다 (text/event-stream). "
+        "대신 **`/chat/sync`**, **`/match/sync`** 동기 엔드포인트를 사용하세요.\n"
+        "- 인증이 필요한 엔드포인트는 Authorization 헤더에 Bearer JWT 토큰을 입력하세요."
     ),
     version=APP_VERSION,
     lifespan=lifespan,
