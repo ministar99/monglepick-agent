@@ -43,15 +43,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import traceback
 import uuid
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import structlog
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
+
+from monglepick.config import settings
 
 from monglepick.agents.admin_assistant.models import (
     AdminAssistantState,
@@ -303,17 +307,114 @@ def build_admin_assistant_graph():
     graph.add_edge("narrator", "response_formatter")
     graph.add_edge("response_formatter", END)
 
-    # MemorySaver checkpointer — v3 에서 interrupt 발동 안 하지만 세션 컨텍스트 보존용 유지.
-    # 운영 레벨에서는 RedisSaver 로 교체 권장 (Phase E Step 7).
-    checkpointer = MemorySaver()
+    # Step 7c (2026-04-27): Checkpointer — env ADMIN_REDIS_CHECKPOINTER_ENABLED=true 면 RedisSaver,
+    # 그 외에는 기존 MemorySaver 유지 (단일 프로세스 인스턴스 / 테스트 환경).
+    # RedisSaver 는 다중 Agent 인스턴스(부하 분산) 간 세션 공유 + 영속성 제공.
+    # asetup() 은 main.py lifespan 의 setup_admin_assistant_checkpointer() 에서 1회 호출.
+    checkpointer, kind = _make_admin_checkpointer()
+
+    # 모듈 변수에 저장 — startup hook 이 같은 인스턴스에 asetup() 호출하기 위함.
+    global _admin_assistant_saver
+    _admin_assistant_saver = checkpointer
+
     compiled = graph.compile(checkpointer=checkpointer)
     logger.info(
         "admin_assistant_graph_compiled",
         node_count=11,
-        checkpointer="memory",
+        checkpointer=kind,
         version="v3_phase_d",
     )
     return compiled
+
+
+# ============================================================
+# Step 7c — Checkpointer 팩토리 + lifespan setup
+# ============================================================
+
+#: 모듈 레벨 saver 인스턴스 보관 — `setup_admin_assistant_checkpointer()` 가 같은 인스턴스에
+#: asetup() 호출하도록. None 이면 그래프가 아직 컴파일되지 않은 상태.
+_admin_assistant_saver: Any | None = None
+
+
+def _is_redis_checkpointer_enabled() -> bool:
+    """ADMIN_REDIS_CHECKPOINTER_ENABLED 환경변수 — true/1/yes 외에는 비활성."""
+    return os.getenv("ADMIN_REDIS_CHECKPOINTER_ENABLED", "false").lower() in ("true", "1", "yes")
+
+
+def _make_admin_checkpointer() -> tuple[Any, str]:
+    """
+    환경변수에 따라 RedisSaver 또는 MemorySaver 반환.
+
+    RedisSaver 키 prefix 는 admin_assistant 전용 네임스페이스로 격리해 다른 Agent 의
+    체크포인트와 충돌하지 않게 한다. asetup() (Redis Search 인덱스 생성) 은 별도 함수
+    `setup_admin_assistant_checkpointer()` 가 FastAPI lifespan 에서 호출.
+
+    Redis 패키지 import 실패 시(개발 환경에서 패키지 미설치) MemorySaver 로 안전 폴백.
+
+    Returns:
+        (saver_instance, kind_label) — kind 는 로그/메트릭 용 ("memory" | "redis").
+    """
+    if not _is_redis_checkpointer_enabled():
+        return MemorySaver(), "memory"
+
+    try:
+        from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+    except ImportError as e:
+        logger.warning(
+            "admin_redis_checkpointer_import_failed_fallback_memory",
+            error=str(e),
+        )
+        return MemorySaver(), "memory"
+
+    try:
+        saver = AsyncRedisSaver(
+            redis_url=settings.REDIS_URL,
+            checkpoint_prefix="admin_assistant:checkpoint",
+            checkpoint_blob_prefix="admin_assistant:cp_blob",
+            checkpoint_write_prefix="admin_assistant:cp_write",
+        )
+    except Exception as e:
+        logger.warning(
+            "admin_redis_checkpointer_init_failed_fallback_memory",
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+        return MemorySaver(), "memory"
+
+    logger.info("admin_redis_checkpointer_initialized", redis_url=settings.REDIS_URL)
+    return saver, "redis"
+
+
+async def setup_admin_assistant_checkpointer() -> None:
+    """
+    FastAPI lifespan 에서 1회 호출 — RedisSaver 의 Redis Search 인덱스 생성.
+
+    MemorySaver 인 경우 no-op. RedisSaver `asetup()` 는 idempotent — 이미 인덱스가
+    있어도 안전하게 통과. 실패 시 경고만 남기고 앱 기동 차단하지 않음 (체크포인트 없이도
+    Agent 는 동작 — interrupt 미사용 v3 그래프).
+    """
+    saver = _admin_assistant_saver
+    if saver is None:
+        logger.warning("admin_checkpointer_not_initialized")
+        return
+
+    asetup = getattr(saver, "asetup", None)
+    if asetup is None:
+        # MemorySaver — setup 불필요
+        logger.info("admin_checkpointer_setup_skipped", kind=type(saver).__name__)
+        return
+
+    try:
+        await asetup()
+        logger.info("admin_checkpointer_setup_done", kind=type(saver).__name__)
+    except Exception as e:
+        # 실패 시 운영자가 인지하도록 ERROR 레벨 + 앱은 계속 기동 (체크포인트 미사용 동작)
+        logger.error(
+            "admin_checkpointer_setup_failed",
+            kind=type(saver).__name__,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
 
 
 # 모듈 레벨 싱글턴 — 컴파일 1회
