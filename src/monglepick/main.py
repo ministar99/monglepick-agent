@@ -184,6 +184,18 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("ollama_warmup_skipped", mode=settings.LLM_MODE, reason="Ollama 미사용")
 
+    # ── [3] Admin Assistant Checkpointer setup ──
+    # ADMIN_REDIS_CHECKPOINTER_ENABLED=true 면 Redis Search 인덱스 생성.
+    # MemorySaver 면 no-op. 실패해도 앱 기동 차단 X (Agent 는 체크포인트 없이도 동작).
+    try:
+        from monglepick.agents.admin_assistant.graph import setup_admin_assistant_checkpointer
+        await setup_admin_assistant_checkpointer()
+    except Exception as e:
+        logger.error(
+            "admin_checkpointer_setup_unexpected_error",
+            error=str(e), error_type=type(e).__name__,
+        )
+
     startup_elapsed_ms = (time.perf_counter() - startup_start) * 1000
     logger.info("app_startup_complete", version=APP_VERSION, elapsed_ms=round(startup_elapsed_ms, 1))
 
