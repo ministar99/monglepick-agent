@@ -769,22 +769,43 @@ class TestCharacterCategory:
         assert "배역" in result["selector_message"]
         assert "부족" in result["selector_message"]
 
-    # ── fallback_filler: character 모드에서 is_fallback 초안 제거 ─
+    # ── fallback_filler: character 모드에서 장르 is_fallback 초안 제거 ─
 
     @pytest.mark.asyncio
-    async def test_fallback_filler_filters_is_fallback_for_character(self):
+    async def test_fallback_filler_filters_genre_fallback_for_character(self):
         fb_draft = QuizDraft(
             movie_id="m1", movie_title="X",
             question="장르는?", options=["드라마","액션","코미디","공포"],
             correct_answer="드라마",
+            category="genre",  # fallback은 항상 genre
             is_fallback=True, valid=True,
         )
         result = await fallback_filler({
             "diversified_drafts": [fb_draft],
             "quiz_type": "character",
         })
-        # character 모드: is_fallback 초안은 최종 결과에서 제외
+        # character 모드: category="genre" is_fallback은 제외
         assert result["final_drafts"] == []
+
+    # ── fallback_filler: genre 모드에서 genre is_fallback 초안은 유지 ─
+
+    @pytest.mark.asyncio
+    async def test_fallback_filler_keeps_genre_fallback_for_genre_type(self):
+        fb_draft = QuizDraft(
+            movie_id="m1", movie_title="기생충",
+            question="'기생충' 영화의 주요 장르는 무엇인가요?",
+            options=["드라마","액션","코미디","공포"],
+            correct_answer="드라마",
+            category="genre",
+            is_fallback=True, valid=True,
+        )
+        result = await fallback_filler({
+            "diversified_drafts": [fb_draft],
+            "quiz_type": "genre",
+        })
+        # genre 모드: category="genre" fallback은 요청 카테고리와 일치 → 유지
+        assert len(result["final_drafts"]) == 1
+        assert result["final_drafts"][0].is_fallback is True
 
     # ── fallback_filler: character 모드에서 valid LLM 초안은 유지 ─
 
