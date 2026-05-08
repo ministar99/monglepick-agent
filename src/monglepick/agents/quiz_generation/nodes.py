@@ -656,6 +656,12 @@ async def question_generator(state: QuizGenerationState) -> dict:
             movie_ids=skipped_no_data,
         )
 
+    if not tasks:
+        type_label = {"plot": "줄거리", "cast": "출연진", "character": "배역", "director": "감독", "year": "개봉연도", "genre": "장르"}.get(quiz_type, quiz_type)
+        msg = f"후보 영화 {len(movies)}편 모두 '{type_label}' 데이터가 부족하여 퀴즈를 생성할 수 없습니다."
+        logger.warning("quiz_generation_no_tasks", quiz_type=quiz_type, total_movies=len(movies))
+        return {"drafts": [], "selector_message": msg}
+
     drafts = await asyncio.gather(*tasks, return_exceptions=False)
     drafts_list: list[QuizDraft] = list(drafts)
 
@@ -966,9 +972,12 @@ async def persistence(state: QuizGenerationState) -> dict:
         message = f"AI 가 퀴즈 {count}개를 생성하여 PENDING 으로 등록했습니다."
     elif selector_msg:
         message = selector_msg
-    elif forced_movie_id and quiz_type != "auto":
-        type_label = {"plot": "줄거리", "cast": "출연진", "director": "감독", "year": "개봉연도"}.get(quiz_type, quiz_type)
-        message = f"선택한 영화에 '{type_label}' 데이터가 부족하거나 LLM 생성에 실패했습니다. 다른 유형을 선택해 주세요."
+    elif quiz_type != "auto":
+        type_label = {"plot": "줄거리", "cast": "출연진", "character": "배역", "director": "감독", "year": "개봉연도", "genre": "장르"}.get(quiz_type, quiz_type)
+        if forced_movie_id:
+            message = f"선택한 영화에 '{type_label}' 데이터가 부족하거나 LLM 생성에 실패했습니다. 다른 유형을 선택해 주세요."
+        else:
+            message = f"후보 영화에 '{type_label}' 데이터가 부족하거나 LLM 생성에 실패했습니다. 다른 카테고리를 선택하거나 다시 시도해 주세요."
     else:
         message = "퀴즈 생성에 실패했습니다. 로그를 확인해 주세요."
 
