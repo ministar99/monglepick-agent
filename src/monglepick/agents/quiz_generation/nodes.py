@@ -416,14 +416,25 @@ async def metadata_enricher(state: QuizGenerationState) -> dict:
                 mid = str(doc["_id"])
                 src = doc.get("_source") or {}
 
-                # "배우명(배역)" 쌍 파싱 — cast_characters 우선, kobis_actors 보완
-                cast_chars_text = src.get("cast_characters", "") or ""
-                kobis_actors_text = src.get("kobis_actors", "") or ""
-                pairs = re.findall(r'([^\s(]+)\(([^)]+)\)', cast_chars_text)
+                # "배우명(배역)" 쌍 파싱
+                # kobis_actors: 한국어 단어 이름 → 정규식으로 정확히 파싱 (한국 영화 전용)
+                # cast_characters: TMDB 영문 이름 "First Last(Character)" → 공백 포함 이름을 위해
+                #   괄호 바로 앞 토큰만 추출하면 성(Last)만 나오므로, 괄호 앞 전체 토큰 그룹을 추출
+                kobis_actors_text = str(src.get("kobis_actors") or "")
+                cast_chars_text = str(src.get("cast_characters") or "")
+
+                # kobis_actors 파싱: 단어 단위 이름(공백 없음) + 괄호 배역
                 kobis_pairs = re.findall(r'([^\s(]+)\(([^)]+)\)', kobis_actors_text)
+
+                # cast_characters 파싱: "이름 이름2(배역)" 형태 — 괄호 직전까지 전체를 이름으로 추출
+                cast_pairs = re.findall(r'([^(]+)\(([^)]+)\)', cast_chars_text)
+                cast_pairs = [(name.strip().split()[-1] if name.strip() else "", role.strip())
+                              for name, role in cast_pairs]  # 마지막 토큰(성)만 사용 (LLM과 일치 어려우므로 환각 가드에만 활용)
+
                 seen_names: set[str] = set()
                 combined: list[str] = []
-                for name, role in pairs + kobis_pairs:
+                # kobis_actors 우선 (한국어 이름 정확), cast_characters는 중복 없을 때만 추가
+                for name, role in kobis_pairs + cast_pairs:
                     role = role.strip()
                     if name and role and name not in seen_names:
                         seen_names.add(name)
@@ -636,6 +647,33 @@ async def question_generator(state: QuizGenerationState) -> dict:
 
     import random
     start_idx = random.randint(0, len(CATEGORY_ROTATION) - 1)
+
+    # auto 모드에서 character 슬롯이 cast_with_roles 없는 영화에 배정될 경우,
+    # cast_with_roles 가 있는 다른 영화와 순서를 교환해 character 퀴즈 생성 기회를 높인다.
+    if quiz_type == "auto":
+        char_idx_in_rotation = CATEGORY_ROTATION.index("character") if "character" in CATEGORY_ROTATION else -1
+        if char_idx_in_rotation >= 0:
+            # 각 영화가 받을 rotation 인덱스 계산
+            assigned = [(start_idx + i) % len(CATEGORY_ROTATION) for i in range(len(movies))]
+            try:
+                char_movie_pos = assigned.index(char_idx_in_rotation)
+                if len(movies[char_movie_pos].cast_with_roles) < 2:
+                    # character 슬롯 영화에 데이터 없음 → cast_with_roles >= 2 인 다른 영화와 교환
+                    swap_pos = next(
+                        (j for j, m in enumerate(movies)
+                         if j != char_movie_pos and len(m.cast_with_roles) >= 2),
+                        None,
+                    )
+                    if swap_pos is not None:
+                        movies = list(movies)
+                        movies[char_movie_pos], movies[swap_pos] = movies[swap_pos], movies[char_movie_pos]
+                        logger.info(
+                            "quiz_generation_character_slot_swapped",
+                            from_pos=char_movie_pos,
+                            to_pos=swap_pos,
+                        )
+            except (ValueError, StopIteration):
+                pass
 
     tasks = []
     skipped_no_data: list[str] = []
