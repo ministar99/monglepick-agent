@@ -860,11 +860,12 @@ async def fallback_filler(state: QuizGenerationState) -> dict:
     forced_movie_id = (state.get("forced_movie_id") or "").strip() or None
     quiz_type = (state.get("quiz_type") or "auto").lower()
 
-    # 카테고리 지정 모드: LLM이 실제 생성한 초안만 반환 (장르 fallback 금지)
-    # quiz_type != 'auto' 이면 관리자가 의도한 카테고리와 다른 장르 fallback은 노출하지 않는다.
-    # forced_movie_id(영화 직접 지정) 여부와 관계없이 동일하게 적용한다.
+    # 카테고리 지정 모드: genre 외 카테고리 요청 시 장르 fallback 템플릿을 차단한다.
+    # _build_fallback_draft 는 항상 category="genre" 초안을 생성하므로,
+    # quiz_type="genre" 요청이면 fallback 도 유효한 결과로 허용한다.
+    # cast/director/plot/character 요청 시 장르 템플릿이 섞이는 것을 방지.
     if quiz_type != "auto":
-        final = [d for d in drafts if d.valid and not d.is_fallback]
+        final = [d for d in drafts if d.valid and (not d.is_fallback or quiz_type == "genre")]
         logger.info(
             "quiz_generation_fallback_skipped_forced_category",
             quiz_type=quiz_type,
