@@ -787,23 +787,24 @@ class TestCharacterCategory:
         # character 모드: category="genre" is_fallback은 제외
         assert result["final_drafts"] == []
 
-    # ── fallback_filler: genre 모드에서 genre is_fallback 초안은 유지 ─
+    # ── fallback_filler: quiz_type=genre 이면 장르 fallback 통과 ─────
 
     @pytest.mark.asyncio
     async def test_fallback_filler_keeps_genre_fallback_for_genre_type(self):
+        # _build_fallback_draft 는 항상 category="genre" 초안을 만든다.
+        # quiz_type="genre" 요청 시 해당 fallback 은 올바른 카테고리이므로 통과시킨다.
         fb_draft = QuizDraft(
             movie_id="m1", movie_title="기생충",
             question="'기생충' 영화의 주요 장르는 무엇인가요?",
             options=["드라마","액션","코미디","공포"],
             correct_answer="드라마",
-            category="genre",
+            category="genre",  # _build_fallback_draft 가 항상 생성하는 값
             is_fallback=True, valid=True,
         )
         result = await fallback_filler({
             "diversified_drafts": [fb_draft],
-            "quiz_type": "genre",
+            "quiz_type": "genre",  # genre 요청 → fallback(genre) 허용
         })
-        # genre 모드: category="genre" fallback은 요청 카테고리와 일치 → 유지
         assert len(result["final_drafts"]) == 1
         assert result["final_drafts"][0].is_fallback is True
 
