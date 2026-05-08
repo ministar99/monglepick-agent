@@ -647,3 +647,160 @@ class TestGraphEndToEnd:
         assert final["success"] is False
         assert final["persisted"] == []
         assert "후보 영화가 없습니다" in final["final_message"]
+
+
+# ============================================================
+# 15) 배역(character) 카테고리 전용 테스트
+# ============================================================
+
+
+from monglepick.agents.quiz_generation.nodes import _select_forced_category
+
+
+class TestCharacterCategory:
+    # ── _select_category: character 라운드로빈 ──────────────────
+
+    def test_select_category_character_with_roles(self):
+        # CATEGORY_ROTATION[5] == "character". cast_with_roles >= 2 이면 선택.
+        m = CandidateMovie(
+            movie_id="m1", title="기생충",
+            cast_with_roles=["송강호(기택)", "최우식(기우)"],
+        )
+        assert _select_category(m, 5) == "character"
+
+    def test_select_category_character_downgrade_no_roles(self):
+        # cast_with_roles < 2 이면 general 로 강등.
+        m = CandidateMovie(movie_id="m1", title="X", cast_with_roles=[])
+        assert _select_category(m, 5) == "general"
+
+    def test_select_category_character_downgrade_one_role(self):
+        m = CandidateMovie(movie_id="m1", title="X", cast_with_roles=["송강호(기택)"])
+        assert _select_category(m, 5) == "general"
+
+    # ── _select_forced_category: quiz_type="character" ──────────
+
+    def test_forced_category_character_ok(self):
+        m = CandidateMovie(
+            movie_id="m1", title="X",
+            cast_with_roles=["송강호(기택)", "최우식(기우)"],
+        )
+        assert _select_forced_category(m, "character") == "character"
+
+    def test_forced_category_character_skipped_no_roles(self):
+        m = CandidateMovie(movie_id="m1", title="X", cast_with_roles=[])
+        assert _select_forced_category(m, "character") is None
+
+    # ── question_generator: character 퀴즈 LLM 정상 ─────────────
+
+    @pytest.mark.asyncio
+    async def test_character_quiz_generated_from_llm(self):
+        movies = [CandidateMovie(
+            movie_id="mv1", title="기생충",
+            cast_with_roles=["송강호(기택)", "최우식(기우)", "박소담(기정)"],
+        )]
+        llm_response = MagicMock()
+        llm_response.content = json.dumps({
+            "question": "이 영화에서 기택 역을 맡은 배우는?",
+            "options": ["송강호", "최우식", "이선균", "박소담"],
+            "correctAnswer": "송강호",
+            "explanation": "송강호가 기택 역을 맡았습니다.",
+            "hint": "이 배우의 다른 대표작으로는 살인의 추억이 있습니다.",
+            "category": "character",
+        }, ensure_ascii=False)
+
+        with patch.object(qg_nodes, "get_conversation_llm", MagicMock(return_value=MagicMock())), \
+             patch.object(qg_nodes, "guarded_ainvoke", AsyncMock(return_value=llm_response)):
+            result = await question_generator({
+                "enriched_candidates": movies,
+                "difficulty": "medium",
+                "quiz_type": "character",
+            })
+
+        drafts = result["drafts"]
+        assert len(drafts) == 1
+        assert drafts[0].is_fallback is False
+        assert drafts[0].category == "character"
+        assert drafts[0].correct_answer == "송강호"
+
+    # ── 환각 방지: 정답이 cast_with_roles에 없으면 fallback ──────
+
+    @pytest.mark.asyncio
+    async def test_character_hallucination_guard(self):
+        movies = [CandidateMovie(
+            movie_id="mv1", title="기생충",
+            cast_with_roles=["송강호(기택)", "최우식(기우)"],
+        )]
+        llm_response = MagicMock()
+        llm_response.content = json.dumps({
+            "question": "이 영화에서 기택 역을 맡은 배우는?",
+            "options": ["이병헌", "최민식", "이선균", "박소담"],  # 정답이 cast_with_roles에 없음
+            "correctAnswer": "이병헌",
+            "explanation": "이병헌이 기택 역입니다.",
+            "category": "character",
+        }, ensure_ascii=False)
+
+        with patch.object(qg_nodes, "get_conversation_llm", MagicMock(return_value=MagicMock())), \
+             patch.object(qg_nodes, "guarded_ainvoke", AsyncMock(return_value=llm_response)):
+            result = await question_generator({
+                "enriched_candidates": movies,
+                "difficulty": "medium",
+                "quiz_type": "character",
+            })
+
+        drafts = result["drafts"]
+        assert len(drafts) == 1
+        assert drafts[0].is_fallback is True  # 환각 → fallback
+
+    # ── question_generator: 전 영화 데이터 부족 → selector_message ─
+
+    @pytest.mark.asyncio
+    async def test_character_all_movies_skipped_returns_message(self):
+        # cast_with_roles 없는 영화만 후보 → 전부 스킵 → selector_message
+        movies = [
+            CandidateMovie(movie_id="mv1", title="X", cast_with_roles=[]),
+            CandidateMovie(movie_id="mv2", title="Y", cast_with_roles=["김수현(혼자)"]),  # 1개 = 부족
+        ]
+        result = await question_generator({
+            "enriched_candidates": movies,
+            "difficulty": "medium",
+            "quiz_type": "character",
+        })
+        assert result["drafts"] == []
+        assert "배역" in result["selector_message"]
+        assert "부족" in result["selector_message"]
+
+    # ── fallback_filler: character 모드에서 is_fallback 초안 제거 ─
+
+    @pytest.mark.asyncio
+    async def test_fallback_filler_filters_is_fallback_for_character(self):
+        fb_draft = QuizDraft(
+            movie_id="m1", movie_title="X",
+            question="장르는?", options=["드라마","액션","코미디","공포"],
+            correct_answer="드라마",
+            is_fallback=True, valid=True,
+        )
+        result = await fallback_filler({
+            "diversified_drafts": [fb_draft],
+            "quiz_type": "character",
+        })
+        # character 모드: is_fallback 초안은 최종 결과에서 제외
+        assert result["final_drafts"] == []
+
+    # ── fallback_filler: character 모드에서 valid LLM 초안은 유지 ─
+
+    @pytest.mark.asyncio
+    async def test_fallback_filler_keeps_valid_draft_for_character(self):
+        valid_draft = QuizDraft(
+            movie_id="m1", movie_title="기생충",
+            question="이 영화에서 기택 역을 맡은 배우는?",
+            options=["송강호","최우식","이선균","박소담"],
+            correct_answer="송강호",
+            category="character",
+            is_fallback=False, valid=True,
+        )
+        result = await fallback_filler({
+            "diversified_drafts": [valid_draft],
+            "quiz_type": "character",
+        })
+        assert len(result["final_drafts"]) == 1
+        assert result["final_drafts"][0].correct_answer == "송강호"
