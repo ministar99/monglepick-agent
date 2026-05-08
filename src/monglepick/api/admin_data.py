@@ -38,6 +38,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
@@ -54,7 +55,7 @@ from typing import Any, Optional
 import structlog
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
 
 from monglepick.config import settings
@@ -183,29 +184,104 @@ class PipelineCancelRequest(BaseModel):
     job_id: str = Field(..., description="취소할 작업 ID")
 
 
-class MovieUpdateRequest(BaseModel):
-    """영화 수정 요청 — 부분 업데이트 지원."""
-
-    title: Optional[str] = None
-    title_en: Optional[str] = None
-    overview: Optional[str] = None
-    genres: Optional[str] = Field(None, description="JSON 배열 문자열 (예: '[\"액션\", \"SF\"]')")
-    release_year: Optional[int] = None
-    rating: Optional[float] = None
-    runtime: Optional[int] = None
-    director: Optional[str] = None
-    # 2026-04-14: movies 테이블 실제 컬럼명은 `poster_path` (Backend Movie.java 와 일치).
-    # 과거에 사용되던 `poster_url` 은 존재하지 않아 SQL 에러(1054)를 유발하므로 제거.
-    poster_path: Optional[str] = None
-
-
 def _to_camel(s: str) -> str:
     """snake_case → camelCase 변환 (Pydantic alias_generator 용)."""
     parts = s.split("_")
     return parts[0] + "".join(p.title() for p in parts[1:])
 
 
-class MovieCreateRequest(BaseModel):
+def _normalize_genres_input(value: Any) -> Optional[str]:
+    """
+    genres 입력을 movies JSON 컬럼에 저장 가능한 문자열로 정규화한다.
+
+    허용 입력:
+      - JSON 배열 문자열: '["액션","SF"]'
+      - 쉼표 구분 문자열: '액션, SF'
+      - 배열: ["액션", "SF"]  (CSV 가져오기 경로)
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, list):
+        normalized = [str(item).strip() for item in value if str(item).strip()]
+        return json.dumps(normalized, ensure_ascii=False) if normalized else None
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                try:
+                    # 레거시 데이터 중 "['액션', 'SF']" 형태(Python repr)를 허용한다.
+                    parsed = ast.literal_eval(stripped)
+                except (ValueError, SyntaxError):
+                    # 마지막 폴백: "[액션, SF]" 같은 느슨한 리스트 표기
+                    inner = stripped[1:-1].strip()
+                    if not inner:
+                        return None
+                    parsed = [part.strip(" '\"") for part in inner.split(",") if part.strip(" '\"")]
+
+            if isinstance(parsed, tuple):
+                parsed = list(parsed)
+
+            if not isinstance(parsed, list):
+                raise ValueError("genres 는 JSON 배열이어야 합니다.")
+
+            normalized = [str(item).strip() for item in parsed if str(item).strip()]
+            return json.dumps(normalized, ensure_ascii=False) if normalized else None
+
+        if "," in stripped:
+            normalized = [part.strip() for part in stripped.split(",") if part.strip()]
+            return json.dumps(normalized, ensure_ascii=False) if normalized else None
+
+        return json.dumps([stripped], ensure_ascii=False)
+
+    raise ValueError("genres 는 문자열 또는 배열이어야 합니다.")
+
+
+class MovieWriteFields(BaseModel):
+    """영화 생성/수정 요청의 공통 필드."""
+
+    model_config = {
+        "alias_generator": _to_camel,
+        "populate_by_name": True,
+    }
+
+    title: Optional[str] = Field(None, max_length=500, description="영화 제목")
+    title_en: Optional[str] = Field(None, max_length=500, description="영문 제목")
+    overview: Optional[str] = Field(None, description="줄거리")
+    genres: Optional[str | list[str]] = Field(
+        None, description="JSON 배열 문자열, 쉼표 구분 문자열, 또는 문자열 배열"
+    )
+    director: Optional[str] = Field(None, max_length=500, description="감독명")
+    release_year: Optional[int] = Field(None, ge=1800, le=2100)
+    release_date: Optional[str] = Field(None, description="ISO 날짜 (YYYY-MM-DD)")
+    runtime: Optional[int] = Field(None, ge=0, description="상영 시간(분)")
+    rating: Optional[float] = Field(None, ge=0.0, le=10.0, description="평점")
+    poster_path: Optional[str] = Field(None, max_length=1000)
+    certification: Optional[str] = Field(None, max_length=50, description="관람등급")
+    trailer_url: Optional[str] = Field(None, max_length=1000)
+    tagline: Optional[str] = Field(None, max_length=500)
+    original_language: Optional[str] = Field(None, max_length=10)
+    backdrop_path: Optional[str] = Field(None, max_length=1000)
+    adult: Optional[bool] = None
+
+    @field_validator("genres", mode="before")
+    @classmethod
+    def validate_genres(cls, value: Any) -> Optional[str]:
+        """CSV/폼 입력을 일관된 JSON 문자열로 변환한다."""
+        return _normalize_genres_input(value)
+
+
+class MovieUpdateRequest(MovieWriteFields):
+    """영화 수정 요청 — 부분 업데이트 지원."""
+
+
+class MovieCreateRequest(MovieWriteFields):
     """
     영화 신규 등록 요청.
 
@@ -218,31 +294,9 @@ class MovieCreateRequest(BaseModel):
     Pydantic alias_generator 로 입력 시 자동 매핑되도록 한다.
     """
 
-    class Config:
-        # UI 가 camelCase 로 전송하므로 alias 매핑 허용
-        alias_generator = _to_camel
-        populate_by_name = True
-
     movie_id: str = Field(..., max_length=50, description="영화 ID (movies.movie_id UNIQUE)")
     title: str = Field(..., max_length=500, description="영화 제목")
-
-    title_en: Optional[str] = Field(None, max_length=500, description="영문 제목")
     tmdb_id: Optional[int] = Field(None, description="TMDB ID (있으면 UNIQUE)")
-    overview: Optional[str] = Field(None, description="줄거리")
-    genres: Optional[str] = Field(
-        None, description="장르 JSON 배열 문자열 또는 쉼표 구분 문자열"
-    )
-    director: Optional[str] = Field(None, max_length=200, description="감독명")
-    release_year: Optional[int] = Field(None, ge=1800, le=2100)
-    release_date: Optional[str] = Field(None, description="ISO 날짜 (YYYY-MM-DD)")
-    runtime: Optional[int] = Field(None, ge=0, description="상영 시간(분)")
-    rating: Optional[float] = Field(None, ge=0.0, le=10.0, description="평점")
-    poster_path: Optional[str] = Field(None, max_length=1000)
-    backdrop_path: Optional[str] = Field(None, max_length=1000)
-    certification: Optional[str] = Field(None, max_length=20, description="관람등급")
-    trailer_url: Optional[str] = Field(None, max_length=1000)
-    tagline: Optional[str] = Field(None, max_length=500)
-    original_language: Optional[str] = Field(None, max_length=10)
     adult: Optional[bool] = Field(default=False)
 
 
@@ -547,7 +601,7 @@ async def list_movies(
                 #   2) `source`, `release_date` 컬럼 추가 → MovieTable.jsx 가 원하는 필드 셋 충족
                 offset = page * size
                 list_sql = (
-                    f"SELECT movie_id, title, title_en, release_year, release_date, "
+                    f"SELECT movie_id, tmdb_id, title, title_en, release_year, release_date, "
                     f"rating, director, poster_path, runtime, source "
                     f"FROM movies {where_sql} "
                     f"ORDER BY release_year DESC, movie_id DESC "
@@ -561,7 +615,7 @@ async def list_movies(
                 # 한 응답으로 커버하기 위한 의도된 alias 이다.
                 items = []
                 for row in rows:
-                    movie_id, title, title_en, rel_year, rel_date, rating, director, poster_path, runtime, source = row
+                    movie_id, tmdb_id, title, title_en, rel_year, rel_date, rating, director, poster_path, runtime, source = row
                     # release_date 는 LocalDate → ISO 문자열
                     rel_date_str = rel_date.isoformat() if rel_date is not None else None
                     items.append(
@@ -580,10 +634,14 @@ async def list_movies(
                             "director": director,
                             # MovieMasterTab.jsx 기대 필드 (camelCase)
                             "movieId": movie_id,
+                            "tmdbId": tmdb_id,
                             "titleEn": title_en,
                             "releaseYear": rel_year,
+                            "releaseDate": rel_date_str,
                             "rating": rating,
+                            "director": director,
                             "posterPath": poster_path,
+                            "runtime": runtime,
                         }
                     )
 
@@ -762,15 +820,15 @@ async def create_movie(request: MovieCreateRequest) -> dict:
                 await cur.execute(
                     """
                     INSERT INTO movies (
-                        movie_id, tmdb_id, title, original_title, overview,
-                        genres, release_date, runtime, vote_average,
-                        poster_path, backdrop_path, original_language,
-                        adult, source, created_at, updated_at
+                        movie_id, tmdb_id, title, title_en, overview,
+                        genres, director, release_year, release_date, runtime,
+                        rating, poster_path, certification, trailer_url, tagline,
+                        original_language, backdrop_path, adult, source, created_at, updated_at
                     ) VALUES (
                         %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, 'admin', NOW(), NOW()
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, 'admin', NOW(), NOW()
                     )
                     """,
                     (
@@ -780,12 +838,17 @@ async def create_movie(request: MovieCreateRequest) -> dict:
                         request.title_en,
                         request.overview,
                         request.genres,
+                        request.director,
+                        request.release_year,
                         request.release_date,
                         request.runtime,
                         request.rating,
                         request.poster_path,
-                        request.backdrop_path,
+                        request.certification,
+                        request.trailer_url,
+                        request.tagline,
                         request.original_language,
+                        request.backdrop_path,
                         1 if request.adult else 0,
                     ),
                 )
@@ -819,11 +882,11 @@ async def create_movie(request: MovieCreateRequest) -> dict:
 async def update_movie(movie_id: str, request: MovieUpdateRequest) -> dict:
     """영화 메타데이터 수정 — MySQL 우선, 나머지 4DB 베스트-에포트."""
     # 1. 동적 UPDATE SET 절 구성
-    update_dict = request.dict(exclude_none=True)
+    update_dict = request.model_dump(exclude_none=True)
     if not update_dict:
         raise HTTPException(status_code=400, detail="변경할 필드가 없습니다.")
 
-    set_clauses = ", ".join(f"{k} = %s" for k in update_dict.keys())
+    set_clauses = ", ".join(f"{k} = %s" for k in update_dict.keys()) + ", updated_at = NOW()"
     params = list(update_dict.values()) + [movie_id]
 
     sync_results: dict[str, Any] = {}
