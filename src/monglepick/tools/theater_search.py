@@ -40,41 +40,57 @@ _THEATER_KEYWORDS = ["CGV", "롯데시네마", "메가박스"]
 # 검색 반경 최대값 (미터) — 카카오 API 최대 20,000m
 _MAX_RADIUS_M = 20_000
 
-# 영화관 체인 식별 + 모바일 예매 페이지 검색 딥링크 패턴
-# 영화관별 시간표 API 가 공식 공개되지 않아 체인 검색 페이지로 점프시키고
-# 사용자가 영화관명으로 다시 한 번 선택하도록 유도한다 (스크래핑 회피).
-# 키 = 식별 토큰(소문자), 값 = (chain_label, booking_url_template)
-# booking_url_template 의 {q} 자리에 영화관명을 URL 인코딩하여 삽입한다.
-_CHAIN_PATTERNS: list[tuple[str, str, str]] = [
-    # (식별 토큰, chain 라벨, booking URL 템플릿)
-    ("cgv",     "CGV",      "https://m.cgv.co.kr/cgvsearch/Search.aspx?query={q}"),
-    ("롯데",    "롯데시네마", "https://www.lottecinema.co.kr/NLCHS/Cinema/Detail?cinemaQuery={q}"),
-    ("메가박스", "메가박스",  "https://www.megabox.co.kr/theater?searchKeyword={q}"),
+# 영화관 체인 식별 토큰 — chain 라벨만 매핑한다 (booking URL 은 별도 단일 진실 원본 빌더).
+#
+# 2026-05-11 회귀 픽스: 기존엔 체인별 모바일 검색 페이지 URL 을 직접 가리키는 템플릿을 썼지만
+#   - CGV `m.cgv.co.kr/cgvsearch/Search.aspx?query=` — 일부 영화관명에서 "오류가 발생했습니다"
+#   - 롯데시네마 `Cinema/Detail?cinemaQuery=` — `cinemaQuery` 파라미터를 공식적으로 받지 않음
+#   - 메가박스 `theater?searchKeyword=` — searchKeyword 도 사실상 무시되고 결과 0 페이지로 폴백
+# 등 체인별 URL 스키마가 자주 깨져 사용자에게 "오류가 발생했습니다" 페이지를 노출시켰다.
+# 직접 검색 페이지 대신 Naver 모바일 검색으로 우회하면 (1) 공식 영화관 카드 + 시간표 + 예매
+# 버튼이 카드 형태로 정확히 노출되고 (2) URL 스키마 변경 위험이 영원히 사라진다.
+_CHAIN_TOKENS: list[tuple[str, str]] = [
+    # (식별 토큰(소문자), chain 라벨)
+    ("cgv",     "CGV"),
+    ("롯데",    "롯데시네마"),
+    ("메가박스", "메가박스"),
 ]
+
+# Naver 모바일 검색 — "{영화관명} 예매" 쿼리는 공식 영화관 정보 카드(시간표 + 예매 버튼)
+# 를 첫 결과로 노출시켜 어떤 체인에서도 안정적으로 동작한다. URL 스키마는 Naver 가
+# 안정적으로 유지하므로 체인별 URL 회귀 위험 0.
+_BOOKING_SEARCH_URL_TEMPLATE = "https://m.search.naver.com/search.naver?query={q}"
 
 
 def _detect_chain_and_booking_url(name: str) -> tuple[str, str]:
     """
-    영화관명에서 체인을 식별하고 해당 체인의 모바일 검색 딥링크를 생성한다.
+    영화관명에서 체인을 식별하고 안정적인 예매 검색 URL 을 생성한다.
 
-    예: "CGV 강남" → ("CGV", "https://m.cgv.co.kr/cgvsearch/Search.aspx?query=CGV%20%EA%B0%95%EB%82%A8")
+    예: "CGV 강남" → ("CGV", "https://m.search.naver.com/search.naver?query=CGV%20강남%20예매")
 
-    매칭 실패 시 ("기타", "") 반환 — 비체인 상영관(예: 독립영화관) 대응.
+    체인 식별이 실패하면 ("기타", search_url) 로 비체인 상영관도 검색 URL 은 채워준다 —
+    기타 상영관도 Naver 검색으로 정보/예매 카드가 잡히는 경우가 많다.
 
     Args:
         name: 카카오 응답의 place_name (예: "CGV 강남", "롯데시네마 월드타워")
 
     Returns:
-        (chain_label, booking_url) — 매칭 실패 시 ("기타", "")
+        (chain_label, booking_url) — name 이 비어있으면 ("기타", "")
     """
     # urllib import 는 모듈 상단 의존을 줄이기 위해 함수 레벨에서 지연 로드
     from urllib.parse import quote
 
+    if not name:
+        return "기타", ""
+
+    # "{place_name} 예매" — 영화관 정보 카드를 강하게 트리거하는 쿼리.
+    booking_url = _BOOKING_SEARCH_URL_TEMPLATE.format(q=quote(f"{name} 예매"))
+
     lowered = name.lower()
-    for token, chain_label, url_template in _CHAIN_PATTERNS:
+    for token, chain_label in _CHAIN_TOKENS:
         if token in lowered:
-            return chain_label, url_template.format(q=quote(name))
-    return "기타", ""
+            return chain_label, booking_url
+    return "기타", booking_url
 
 
 @tool
