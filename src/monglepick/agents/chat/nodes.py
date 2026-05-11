@@ -2642,15 +2642,52 @@ async def general_responder(state: ChatAgentState) -> dict:
 # 사용자 메시지에서 위치 후보 토큰을 뽑아낼 때 쓰는 휴리스틱.
 # "강남역 근처 영화관" → "강남역" / "홍대 입구 영화관 알려줘" → "홍대 입구"
 # 카카오 keyword fallback 이 충분히 강건하므로 정확한 NER 까진 필요 없다.
+#
+# ⚠️ 패턴 우선순위 — 위에서부터 순차 매칭. 더 구체적인 패턴(시·군 qualifier 포함)이 먼저
+# 와야 동음이의 지명(예: "전주 효자동" vs "서울 효자동", "수원시 장안구" vs "서울 장안구") 의
+# 거짓양성을 피할 수 있다. (2026-05-11 회귀 픽스)
 _LOCATION_HINT_PATTERNS: list[re.Pattern] = [
-    # "○○역" 으로 끝나는 지하철역 토큰 (예: 강남역, 홍대입구역)
+    # ① "[광역/시·군 qualifier] [동/구]" — qualifier 가 있으면 함께 캡처해 카카오 키워드 검색의
+    #    동음이의 fallback 사고를 차단. "전주 효자동" → "전주 효자동" (Seoul 효자동 으로 잘못
+    #    풀리던 회귀 차단). qualifier 의 시/도/군 접미사는 선택 (전주처럼 접미사 없이 도시명만
+    #    오는 발화도 매우 흔함). qualifier 와 동/구 사이 공백 1개 이상 강제 — "잠실동" 같은
+    #    단일 토큰은 ③ 에서 잡힌다.
+    re.compile(
+        r"([가-힣]{1,10}(?:특별시|광역시|특별자치시|특별자치도|시|군|도)?\s+"
+        r"[가-힣A-Za-z0-9]+(?:동|구))"
+    ),
+    # ② "○○역" 으로 끝나는 지하철역 토큰 (예: 강남역, 홍대입구역)
     re.compile(r"([가-힣A-Za-z0-9]+역)"),
-    # 행정구역/지명 + "근처/주변/근방" 앞부분 (예: "강남 근처", "신촌 주변")
+    # ③ 행정구역/지명 + "근처/주변/근방" 앞부분 (예: "강남 근처", "신촌 주변")
     re.compile(r"([가-힣A-Za-z0-9]{2,15})\s*(?:근처|근방|주변|인근)"),
-    # "○○동/○○구" 행정구역 — "○○시" 는 "서울시" 같이 너무 광역이라 카카오 검색 정확도 떨어져 제외.
-    # 시 단위 검색이 필요하면 사용자가 "강남" 처럼 더 좁은 토큰을 보내거나 좌표를 직접 보내면 된다.
+    # ④ 단일 "○○동/○○구" 행정구역 — "○○시" 는 "서울시" 같이 너무 광역이라 카카오 검색 정확도
+    # 떨어져 제외. 시 단위 검색이 필요하면 사용자가 "강남" 처럼 더 좁은 토큰을 보내거나 좌표를
+    # 직접 보내면 된다.
     re.compile(r"([가-힣A-Za-z0-9]+(?:동|구))"),
 ]
+
+
+# 자기참조 위치 표현 — "내 위치/현재 위치/여기" 등은 좌표 권한이 막혀 있다는 뜻이지 지명이 아니다.
+# short_fallback 으로 "내 위치 기반으로 찾아달라" 같은 문장을 그대로 카카오에 던지면 결과가 0
+# 이 나와 무한 위치 재질의 루프를 만든다 (2026-05-11 회귀). tool_executor_node 가 이 패턴을
+# 감지하면 "지역명을 직접 입력하거나 권한을 허용해 달라" 는 clearer 안내로 분기한다.
+_SELF_REFERENCE_LOCATION_RE = re.compile(
+    r"(내\s*위치|현재\s*위치|지금\s*위치|내\s*자리|현\s*위치|여기서|여기"
+    r"|here|my\s*location|current\s*location)",
+    re.IGNORECASE,
+)
+
+
+def _is_self_reference_location(text: str) -> bool:
+    """
+    사용자 입력이 "내 위치/현재 위치/여기" 같은 자기참조 표현인지 판별.
+
+    True 면 좌표 권한 안내 메시지로 분기해 같은 위치 재질의 루프(geocoding 으로 풀 수 없는
+    pronoun 을 그대로 키워드 검색에 던지는 사고)를 끊는다.
+    """
+    if not text:
+        return False
+    return bool(_SELF_REFERENCE_LOCATION_RE.search(text))
 
 
 def _extract_location_hint(text: str, *, allow_short_fallback: bool = False) -> str | None:
@@ -2857,7 +2894,32 @@ async def tool_executor_node(state: ChatAgentState) -> dict:
                 }
                 external_map_location_source_total.labels(source="client_supplied").inc()
             else:
-                # 메시지에서 지명 후보 추출 → geocoding 으로 좌표 변환.
+                # ── ①  자기참조 위치 표현 가드 ──
+                # "내 위치 기반으로 찾아달라", "현재 위치", "여기서" 처럼 좌표 권한이 막혀있다는
+                # 뜻인 표현을 short_fallback 이 그대로 카카오 키워드 검색에 던지면 결과가 0
+                # 이 나와 무한 위치 재질의 루프가 형성된다 (2026-05-11 회귀). 입력에 자기참조
+                # 표현이 보이면 좌표 권한 안내 메시지로 분기해 같은 메시지의 반복을 끊는다.
+                if _is_self_reference_location(current_input):
+                    msg = (
+                        "현재 위치로 찾으려면 브라우저 위치 권한을 허용해주세요. 🛰️ "
+                        "주소창의 자물쇠 → '위치' → '허용' 으로 바꾸시거나, "
+                        "지하철역·동네 이름(예: '강남역', '전주 효자동', '잠실동')을 직접 알려주세요."
+                    )
+                    elapsed_ms = (time.perf_counter() - node_start) * 1000
+                    logger.info(
+                        "tool_executor_node_self_reference_location",
+                        intent=intent_str,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        session_id=session_id,
+                        user_id=user_id,
+                    )
+                    external_map_location_source_total.labels(source="self_reference").inc()
+                    return {
+                        "response": msg,
+                        "pending_question": "awaiting_location",
+                    }
+
+                # ── ②  메시지에서 지명 후보 추출 → geocoding 으로 좌표 변환 ──
                 # 직전 턴이 위치 재질의로 끝났으면(awaiting_location) 사용자가 "강남", "홍대"
                 # 같이 정규식 패턴(역/근처/동·구) 어디에도 안 걸리는 단일 지명으로 답할 때를
                 # 대비해 short_fallback 을 켠다 (입력 자체를 카카오 키워드 검색에 던짐).
@@ -2885,7 +2947,7 @@ async def tool_executor_node(state: ChatAgentState) -> dict:
             if not location_dict:
                 msg = (
                     "어느 지역 근처에서 찾으실까요? 🗺️ "
-                    "지하철역이나 동네 이름(예: '강남역', '홍대 입구', '잠실동')을 알려주세요."
+                    "지하철역이나 동네 이름(예: '강남역', '전주 효자동', '잠실동')을 알려주세요."
                 )
                 elapsed_ms = (time.perf_counter() - node_start) * 1000
                 logger.info(

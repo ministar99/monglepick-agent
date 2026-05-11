@@ -49,7 +49,9 @@ class TestExtractLocationHint:
         ("강남 근처 CGV", "강남"),
         ("신촌 주변 영화관", "신촌"),
         ("잠실동 영화관 어디 있어", "잠실동"),
-        ("서울시 강남구 영화관", "강남구"),
+        # 2026-05-11: city qualifier 보존 패턴 (Pattern ①) — "서울시 강남구" 가 한 덩어리로
+        # 캡처돼야 동음이의 "강남구"(부산 강남구 등) fallback 사고를 막을 수 있다.
+        ("서울시 강남구 영화관", "서울시 강남구"),
     ])
     def test_pattern_matches(self, text, expected):
         assert _extract_location_hint(text) == expected
@@ -61,6 +63,55 @@ class TestExtractLocationHint:
     ])
     def test_no_match_returns_none(self, text):
         assert _extract_location_hint(text) is None
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 2026-05-11 회귀: "전주 효자동" → "효자동" 만 캡처돼 카카오 키워드 검색이 가장 흔한
+    # 서울 효자동(종로구) 으로 fallback 하던 사고. city qualifier 까지 캡처해 카카오에
+    # 보내면 "전주시 완산구 효자동" 으로 정확히 매칭된다.
+    # ────────────────────────────────────────────────────────────────────────
+    @pytest.mark.parametrize("text,expected", [
+        # 시·군 접미사 없는 도시명 + 동
+        ("전주 효자동에서 찾아주세요", "전주 효자동"),
+        ("부산 해운대구 영화관", "부산 해운대구"),
+        # 시·군 접미사 있는 풀네임
+        ("수원시 영통구 알려줘", "수원시 영통구"),
+        ("전주시 완산구 영화관", "전주시 완산구"),
+        # 광역시 접미사
+        ("부산광역시 해운대구", "부산광역시 해운대구"),
+    ])
+    def test_city_qualifier_preserved(self, text, expected):
+        assert _extract_location_hint(text) == expected
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 2026-05-11 회귀: "내 위치 기반으로 찾아달라" 같은 자기참조 phrase 가 short_fallback
+    # 으로 그대로 카카오 키워드 검색에 던져져 결과 0 → 위치 재질의 무한 루프 → tool_executor_node
+    # 단계에서 _is_self_reference_location 으로 끊는다. 이 헬퍼의 단위 동작 확인.
+    # ────────────────────────────────────────────────────────────────────────
+    @pytest.mark.parametrize("text", [
+        "내 위치",
+        "내 위치 기반으로 찾아달라",
+        "현재 위치에서 찾아줘",
+        "지금 위치 근처로",
+        "여기서 가까운 영화관",
+        "여기 근처 영화관",
+        "my location",
+        "current location",
+    ])
+    def test_self_reference_location_detected(self, text):
+        from monglepick.agents.chat.nodes import _is_self_reference_location
+
+        assert _is_self_reference_location(text) is True
+
+    @pytest.mark.parametrize("text", [
+        "강남역",
+        "전주 효자동",
+        "오늘 박스오피스",
+        "",
+    ])
+    def test_self_reference_location_negative(self, text):
+        from monglepick.agents.chat.nodes import _is_self_reference_location
+
+        assert _is_self_reference_location(text) is False
 
 
 # ============================================================
@@ -391,3 +442,82 @@ class TestPendingLocationFlow:
 
         assert "어느 지역" in result["response"]
         assert result.get("pending_question") == "awaiting_location"  # 유지
+
+
+# ============================================================
+# 5. 자기참조 위치 표현 가드 — 2026-05-11 회귀 픽스
+# ============================================================
+
+
+class TestSelfReferenceLocationGuard:
+    """
+    회귀 시나리오:
+    Turn 1) 사용자 "근처영화관 알려줘" → 위치 재질의 (pending_question=awaiting_location)
+    Turn 2) 사용자 "내 위치 기반으로 찾아달라" → short_fallback 이 phrase 를 그대로 카카오에
+            던져 결과 0 → 다시 위치 재질의 → 무한 루프
+    수정: tool_executor_node 가 자기참조 phrase 를 감지하면 좌표 권한 안내 메시지로 분기.
+    """
+
+    @pytest.mark.asyncio
+    async def test_self_reference_phrase_does_not_geocode(self):
+        """
+        '내 위치 기반으로 찾아달라' 같은 자기참조 발화는 geocoding 을 시도하지 않고
+        좌표 권한 안내 메시지로 즉시 응답한다.
+        """
+        state = _state_with_intent(
+            "theater",
+            current_input="내 위치 기반으로 찾아달라",
+            location=None,
+            pending_question="awaiting_location",
+        )
+        mock_geocoding = _make_mock_tool(return_value=None)
+        mock_exec = AsyncMock(return_value={})
+        with patch(
+            "monglepick.agents.chat.nodes.geocoding",
+            new=mock_geocoding,
+        ), patch(
+            "monglepick.agents.chat.nodes.execute_tool",
+            new=mock_exec,
+        ):
+            result = await tool_executor_node(state)
+
+        # geocoding 도 execute_tool 도 호출되지 않아야 함 (pronoun 으로 키워드 검색 X)
+        mock_geocoding.ainvoke.assert_not_awaited()
+        mock_exec.assert_not_awaited()
+        # 좌표 권한 안내 메시지가 노출되고 pending_question 은 유지
+        assert "위치 권한" in result["response"] or "권한" in result["response"]
+        assert result.get("pending_question") == "awaiting_location"
+
+    @pytest.mark.asyncio
+    async def test_real_place_name_still_geocodes(self):
+        """
+        자기참조 가드가 정상 지명까지 잡지 않는지 확인 — '전주 효자동' 은 그대로 geocoding.
+        city qualifier 보존 패턴(Pattern ①) 이 정상 작동하는지도 한 번 더 검증.
+        """
+        geo_result = {
+            "latitude": 35.8242,
+            "longitude": 127.1480,
+            "address": "전북특별자치도 전주시 완산구 효자동",
+            "place_name": "효자동",
+            "source": "keyword",
+        }
+        state = _state_with_intent(
+            "theater",
+            current_input="전주 효자동에서 찾아주세요",
+            location=None,
+            pending_question="awaiting_location",
+        )
+        with patch(
+            "monglepick.agents.chat.nodes.geocoding",
+            new=_make_mock_tool(return_value=geo_result),
+        ) as mock_geo, patch(
+            "monglepick.agents.chat.nodes.execute_tool",
+            new=AsyncMock(return_value={"theater_search": [{"name": "CGV 전주효자", "distance_m": 200}]}),
+        ):
+            result = await tool_executor_node(state)
+
+        # city qualifier 가 보존된 풀 토큰 "전주 효자동" 으로 카카오에 질의
+        mock_geo.ainvoke.assert_awaited_once_with({"query": "전주 효자동"})
+        assert "tool_results" in result
+        # 위치 해소 성공 시 pending_question 비워짐
+        assert result.get("pending_question") is None
